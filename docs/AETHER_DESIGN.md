@@ -3,7 +3,7 @@
 A miniature electronic exchange: price-time priority matching across multiple instruments,
 with a custom order book, a memory pool, and deterministic event replay.
 
-Headline numbers you will measure:
+Headline numbers:
 
 | Metric | Meaning |
 |---|---|
@@ -11,7 +11,13 @@ Headline numbers you will measure:
 | **p50 / p99 / p99.9** | Latency per command: typical case, 1-in-100 worst, 1-in-1000 worst |
 | **Allocations per order** | Heap allocations on the hot path. Target in steady state: exactly **0** |
 
-This document gives you diagrams, pseudocode and type signatures. The code is yours to write.
+Measured on an Apple M1 Pro: **60.5 M commands/sec** on one engine thread with p99 85 ns,
+p99.9 167 ns and **0** heap allocations per command; 263 to 275 M commands/sec across 8
+sharded engine threads. Method, full tables and the limits of these numbers are in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+This document explains the design with diagrams and pseudocode. The implementation lives in
+`libs/`; section 11 maps each part of the design to its file.
 
 > Diagrams are **Mermaid**. They render on GitHub, and in VS Code with the
 > "Markdown Preview Mermaid Support" extension (open preview with `Cmd+Shift+V`).
@@ -218,8 +224,8 @@ Everything else in this project is about making this loop fast.
 
 ## 4. Order lifecycle
 
-Every order is in exactly one of these states. Your events (`Ack`, `Trade`, `Rested`,
-`Expired`, `Canceled`, `Reject`) are the arrows.
+Every order is in exactly one of these states. The events (`Ack`, `Trade`, `Rested`,
+`Expired`, `Canceled`, `Modified`, `Reject`) are the arrows.
 
 ```mermaid
 stateDiagram-v2
@@ -240,16 +246,32 @@ stateDiagram-v2
     Rejected --> [*]
 ```
 
-Modify rules: **qty down** = stay in place (keep priority). **Price change or qty up** =
-cancel + new order (goes to the back of the queue).
+Modify rules:
+
+- **Same price and quantity not above what is left:** changed in place, priority kept.
+  One `Modified` event.
+- **Price change or quantity up:** cancel + new limit order with the same id, at the back of
+  the queue. Events: `Canceled`, `Ack`, then any `Trade`s, then `Rested` if anything is left.
+
+What is rejected, and when (always before the `Ack`, so a rejected command changes nothing):
+
+| Reason | Condition |
+|---|---|
+| `InvalidQty` | quantity is zero or negative |
+| `InvalidPrice` | limit or IOC price outside the instrument's price band |
+| `InvalidOrderId` | order id outside the instrument's id capacity |
+| `DuplicateOrder` | a new order reuses the id of an order still resting |
+| `BookFull` | a new limit order arrives while every order slot is in use |
+| `UnknownOrder` | cancel or modify of an id that is not resting |
+| `UnknownInstrument` | no book for that instrument id |
 
 ---
 
 ## 5. Data structures
 
-The naive book is `std::map<Price, std::list<Order>>`. It is correct and you should **write it
-first**. It is slow because every new order and every new price level calls `new`, and every
-lookup chases pointers across memory.
+The reference book (`RefOrderBook`) is `std::map<Price, std::deque<Order>>` per side plus a
+`std::unordered_map` for id lookup. It is correct and was written first. It is slow because
+new orders and new price levels call `new`, and every lookup chases pointers across memory.
 
 The fast book needs three operations to be cheap:
 
@@ -318,10 +340,14 @@ flowchart TB
 | Catch | slow | bounded price range; when best level empties, scan to next filled cell |
 
 The flat array works because a real instrument trades in a known band (say ±20% around a
-reference price, in ticks). Later, a bitmap of non-empty levels makes "find next filled cell"
-very fast.
+reference price, in ticks). A bitmap with one bit per level (`LevelBitmap`) makes "find the
+next filled cell" a scan of 64 levels per machine word.
 
-### Type sketches (bodies are yours)
+Both sides live in one array indexed by side (`sides_[Buy]`, `sides_[Sell]`), each holding
+its levels, its bitmap and its cached best index. Resting and cancelling then pick the side
+by index instead of branching on buy/sell, which measured about 5% faster.
+
+### Types
 
 ```cpp
 // types.hpp
@@ -332,7 +358,7 @@ enum class Side      : std::uint8_t { Buy, Sell };
 enum class OrderType : std::uint8_t { Limit, Market, IOC };
 
 struct PriceLevel;
-struct Order {                    // aim for one 64-byte cache line
+struct Order {                    // exactly one 64-byte cache line (static_assert)
     OrderId       id;
     Price         price;
     Qty           qty;            // remaining
@@ -341,8 +367,7 @@ struct Order {                    // aim for one 64-byte cache line
     Order*        next  = nullptr;
     PriceLevel*   level = nullptr;// back-pointer for O(1) cancel
     std::uint32_t instrument;
-    Side          side;
-    OrderType     type;
+    Side          side;           // Market and IOC orders never rest, so no type is stored
 };
 
 struct PriceLevel {
@@ -362,17 +387,20 @@ struct PriceLevel {
 classDiagram
     class Engine {
         -vector~OrderBook~ books_
-        +on_command(Command, EventSink)
+        +process(Command, EventSink)
     }
     class OrderBook {
-        -vector~PriceLevel~ bids_
-        -vector~PriceLevel~ asks_
-        -int best_bid_
-        -int best_ask_
+        -BookSide sides_[2]
         -vector~Order*~ index_
         -Pool~Order~ pool_
-        +add(Order, EventSink)
-        +cancel(OrderId, EventSink)
+        +on_new(Command, EventSink)
+        +on_cancel(Command, EventSink)
+        +on_modify(Command, EventSink)
+    }
+    class BookSide {
+        +vector~PriceLevel~ levels
+        +LevelBitmap bits
+        +size_t best
     }
     class PriceLevel {
         +Order* head
@@ -395,7 +423,8 @@ classDiagram
         +destroy(T*)
     }
     Engine "1" --> "many" OrderBook
-    OrderBook "1" --> "many" PriceLevel
+    OrderBook "1" --> "2" BookSide
+    BookSide "1" --> "many" PriceLevel
     PriceLevel "1" --> "many" Order : FIFO
     OrderBook --> Pool~T~ : allocates Orders
 ```
@@ -457,7 +486,7 @@ class Pool {
 public:
     explicit Pool(std::size_t capacity);   // the ONLY allocation; build the free list here
     template <class... Args>
-    T*   create(Args&&... args);           // pop free list, std::construct_at(slot, args...)
+    T*   create(Args&&... args);           // pop free list, construct; nullptr when exhausted
     void destroy(T* p) noexcept;           // std::destroy_at(p), push slot on free list
     std::size_t in_use() const noexcept;
 private:
@@ -467,8 +496,9 @@ private:
 };
 ```
 
-> **Decide what happens when the pool is empty.** A real exchange rejects the order
-> ("book full") rather than calling `new`. Make it a test case.
+> **When the pool is empty** the book rejects the order with `BookFull`, as a real exchange
+> would, rather than calling `new`. The check happens before the `Ack`, and it is covered by
+> a scenario test and by a differential test that runs with a 64-slot pool.
 
 Other hidden allocations to remove from the hot path:
 
@@ -523,11 +553,22 @@ Rules:
   cores fight over one line (false sharing).
 - Capacity N is a power of two so wrap is a mask, not a modulo.
 
-| Start here | Later, if you want more |
-|---|---|
-| 1 gateway, 1 engine, 1 publisher thread | Shard: N engine threads, instrument `i` → thread `i % N`, one ring each |
-| Engine holds `std::vector<OrderBook>` indexed by instrument id | Still deterministic: each book sees only its own ordered stream |
-| Spin-wait on the ring (burns a core, saves µs) | macOS can't hard-pin threads to cores; Linux can (`pthread_setaffinity_np`) |
+What the implementation does beyond the basic ring:
+
+- **Batched hand-off.** `try_push_n` / `try_pop_n` move up to 256 items with one atomic
+  update, so the two cores exchange a cache line per batch instead of per item. The engine
+  thread flushes its output batch before it waits for more input, so events never sit
+  buffered. This took the pipeline from 6.7 M to 25.4 M commands/sec.
+- **Spin, then yield.** A waiting thread spins briefly with a CPU pause hint and then yields
+  the core (`Backoff`), which keeps progress even when there are fewer cores than threads.
+- macOS cannot hard-pin threads to cores; Linux can (`pthread_setaffinity_np`).
+
+### Sharding across cores
+
+Books for different instruments never share state, so engines can be sharded: N engine
+threads, instrument `i` goes to thread `i % N`. Each instrument still sees its own commands
+in order, so every shard stays deterministic. There is no defined order between events of
+different shards.
 
 ```mermaid
 flowchart LR
@@ -538,7 +579,11 @@ flowchart LR
     E1 --> OUT2["ring out"] --> PUB
 ```
 
-(The sharded version above is an optional later step.)
+`run_sharded` implements this and `aether_bench --shards N` measures it: aggregate
+throughput passes 200 M commands/sec at 6 engine threads and reaches 263 to 275 M at 8.
+Scaling is not linear (per-thread throughput falls from 60 M to about 34 M) because the
+threads share memory bandwidth and cache. The live `aetherd` pipeline still runs a single
+engine thread.
 
 ---
 
@@ -619,7 +664,15 @@ packet-beta
   320-383: "order_id (u64)"
 ```
 
-Test: hash every output event (FNV-1a is fine), replay the log into a fresh engine, compare.
+The file starts with a 16-byte header (magic `AETHLOG1`, version, instrument count) and one
+32-byte record per instrument holding its price band, order capacity and id capacity. A log
+is therefore self-describing: `aether_replay` needs nothing but the file.
+
+Output is hashed with FNV-1a applied one 64-bit field at a time (`HashSink`), never over raw
+struct bytes, so padding and byte order cannot affect it. The tests check that a journaled
+run replays to the same hash, that the reference and fast books hash the same, that the
+threaded pipeline matches the single-threaded engine, and they pin a golden hash for a
+fixed seeded stream.
 
 ---
 
@@ -702,8 +755,11 @@ void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 ## 10. Build plan
 
-Order matters: **correctness → a way to measure → speed.** The slow version you write first
+Order matters: **correctness → a way to measure → speed.** The slow version written first
 becomes the oracle every fast version is checked against.
+
+**Status: all eight milestones are implemented**, plus engine sharding. The list below is
+kept as the record of the order the work was done in and what "done" meant for each step.
 
 ```mermaid
 flowchart LR
@@ -767,42 +823,56 @@ flowchart LR
 
 ```
 aether/
-├── CMakeLists.txt
-├── include/aether/
-│   ├── types.hpp         Price, Qty, OrderId, Side, OrderType
-│   ├── events.hpp        Command in; Event out (Ack, Trade, Rested, Expired, Canceled, Reject)
-│   ├── order.hpp         Order with intrusive prev/next
-│   ├── pool.hpp          fixed-capacity object pool
-│   ├── price_level.hpp   FIFO of orders at one price
-│   ├── order_book.hpp    one instrument: bids, asks, best prices, id index
-│   ├── engine.hpp        instrument id → book, command dispatch
-│   ├── event_log.hpp     LogRecord writer / reader
-│   └── spsc_ring.hpp     lock-free single-producer single-consumer queue
-├── src/                  .cpp files + main.cpp
-├── reference/            slow std::map engine, kept as the test oracle
-├── tests/                unit, differential fuzz, replay golden hash
-├── bench/                load generator, latency histogram, alloc counter
-└── tools/replay.cpp      replay a log file, print output hash
+├── CMakeLists.txt, CMakePresets.json     debug (ASan+UBSan), release, tsan
+├── libs/                                 one small library per folder
+│   ├── core/         types.hpp           Price, Qty, OrderId, Side, OrderType
+│   │                 events.hpp          Command in; Event out
+│   │                 event_sink.hpp      EventSink concept
+│   │                 event_factory.hpp   builds events from the command that caused them
+│   │                 config.hpp          BookConfig: price band and capacities
+│   ├── memory/       pool.hpp            fixed-capacity object pool
+│   ├── concurrency/  spsc_ring.hpp       lock-free SPSC ring, batching, Backoff
+│   ├── reference/    ref_order_book.hpp  slow std::map book, kept as the test oracle
+│   ├── book/         order.hpp           Order with intrusive prev/next
+│   │                 price_level.hpp     FIFO of orders at one price
+│   │                 level_bitmap.hpp    one bit per non-empty level
+│   │                 order_book.hpp      the fast book
+│   ├── engine/       engine.hpp          Engine<Book>: instrument id -> book
+│   ├── journal/      event_log.hpp       LogRecord writer / reader
+│   │                 hash.hpp            FNV-1a HashSink
+│   ├── sim/          load_gen.hpp        deterministic seeded order flow
+│   └── runtime/      pipeline.hpp        gateway -> engine -> publisher threads
+│                     sharded.hpp         one engine thread per group of instruments
+├── apps/
+│   ├── aetherd/                          the threaded exchange on generated flow
+│   └── replay/                           replay a log file, print the output hash
+├── bench/                                benchmark, latency histogram, alloc counter
+├── tests/                                unit, scenario, differential, replay
+└── docs/                                 this document, BENCHMARKS.md
 ```
 
-Which header includes which (write them bottom-up):
+Which library depends on which (each can only include what it links):
 
 ```mermaid
 flowchart BT
-    types["types.hpp"]
-    events["events.hpp"] --> types
-    order["order.hpp"] --> types
-    pool["pool.hpp"]
-    level["price_level.hpp"] --> order
-    book["order_book.hpp"] --> level
-    book --> pool
-    book --> events
-    engine["engine.hpp"] --> book
-    log["event_log.hpp"] --> events
-    ring["spsc_ring.hpp"]
-    main["main.cpp"] --> engine
-    main --> log
-    main --> ring
+    core["core"]
+    memory["memory"]
+    concurrency["concurrency"]
+    reference["reference"] --> core
+    book["book"] --> core
+    book --> memory
+    engine["engine"] --> core
+    journal["journal"] --> core
+    sim["sim"] --> core
+    runtime["runtime"] --> engine
+    runtime --> journal
+    runtime --> concurrency
+    apps["apps / bench / tests"] --> runtime
+    apps --> book
+    apps --> reference
+    apps --> sim
 ```
 
-Start with milestone 1: `types.hpp` and `events.hpp`.
+`engine` does not depend on `book` or `reference`: `Engine<Book>` is a template, and the book
+type is chosen where it is used. That is what lets the same engine run the oracle and the
+fast book in the differential tests.
