@@ -29,6 +29,7 @@ namespace aether {
         Expired,
         Canceled,
         Reject,
+        Modified,  // qty reduced in place, priority kept
     };
 
     enum class RejectReason : std::uint8_t {
@@ -39,6 +40,7 @@ namespace aether {
         DuplicateOrder,
         UnknownInstrument,
         BookFull,
+        InvalidOrderId,
     };
 
     struct Event {

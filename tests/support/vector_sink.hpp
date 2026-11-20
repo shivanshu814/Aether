@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include "aether/core/event_sink.hpp"
+#include "support/event_print.hpp"
 
 namespace aether::test {
     struct VectorSink {
