@@ -1,5 +1,7 @@
 add_subdirectory(core)
 add_subdirectory(memory)
+add_subdirectory(concurrency)
 add_subdirectory(reference)
 add_subdirectory(book)
 add_subdirectory(engine)
+add_subdirectory(journal)

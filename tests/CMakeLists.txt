@@ -11,6 +11,7 @@ add_executable(unit_tests
     unit/core/test_core.cpp
     unit/core/test_event_sink.cpp
     unit/memory/test_pool.cpp
+    unit/concurrency/test_spsc_ring.cpp
     unit/book/test_book_parts.cpp
     unit/engine/test_engine.cpp
     scenario/test_matching.cpp
@@ -21,6 +22,8 @@ target_link_libraries(unit_tests PRIVATE
     aether::memory
     aether::reference
     aether::book
+    aether::concurrency
+    aether::journal
     aether::engine
     aether::warnings
     GTest::gtest_main
