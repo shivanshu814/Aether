@@ -19,6 +19,7 @@ namespace aether {
         CommandType type = CommandType::New;
         Side side = Side::Buy;
         OrderType order_type = OrderType::Limit;
+        friend bool operator==(const Command&, const Command&) = default;
     };
 
     enum class EventType : std::uint8_t {
@@ -50,6 +51,7 @@ namespace aether {
         EventType type = EventType::Ack;
         Side side = Side::Buy;
         RejectReason reason = RejectReason::None;
+        friend bool operator==(const Event&, const Event&) = default;
     };
 
     static_assert(std::is_trivially_copyable_v<Command>);

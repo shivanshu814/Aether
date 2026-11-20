@@ -9,7 +9,9 @@ include(GoogleTest)
 
 add_executable(unit_tests
     unit/core/test_core.cpp
+    unit/core/test_event_sink.cpp
 )
+target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(unit_tests PRIVATE
     aether::core
     aether::warnings
