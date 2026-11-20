@@ -15,6 +15,7 @@ add_executable(unit_tests
     unit/book/test_book_parts.cpp
     unit/engine/test_engine.cpp
     scenario/test_matching.cpp
+    differential/test_differential.cpp
 )
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(unit_tests PRIVATE
@@ -24,6 +25,7 @@ target_link_libraries(unit_tests PRIVATE
     aether::book
     aether::concurrency
     aether::journal
+    aether::sim
     aether::engine
     aether::warnings
     GTest::gtest_main
