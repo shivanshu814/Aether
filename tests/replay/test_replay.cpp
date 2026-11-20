@@ -18,8 +18,8 @@ using namespace aether;
 namespace {
 
 // Pinned output of make_stream(20261120, 200'000, 4). See the GoldenHash test.
-constexpr std::uint64_t GOLDEN_EVENTS = 362'903;
-constexpr std::uint64_t GOLDEN_HASH   = 6383623603604726376ULL;
+constexpr std::uint64_t GOLDEN_EVENTS = 357'564;
+constexpr std::uint64_t GOLDEN_HASH   = 8394587788805723800ULL;
 
 struct Stream {
     std::vector<BookConfig> instruments;

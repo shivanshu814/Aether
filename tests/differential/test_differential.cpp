@@ -57,6 +57,43 @@ void run_differential(const sim::LoadConfig& load, const BookConfig& book, bool 
     }
 }
 
+// The generator must produce work that reaches the book: with matching limits, every cancel
+// and modify names an order that is resting at that moment, so nothing is rejected, and the
+// book settles near its target size.
+TEST(LoadGenerator, CancelsAndModifiesAlwaysHitRestingOrders) {
+    sim::LoadConfig load{};
+    load.seed        = 99;
+    load.count       = 200'000;
+    load.instruments = 2;
+    load.target_live = 1'000;
+    const BookConfig              book = sim::book_config_for(load);
+    const std::vector<Command>    commands = sim::generate(load, book);
+    const std::vector<BookConfig> instruments(load.instruments, book);
+
+    Engine<OrderBook> engine(instruments);
+    test::VectorSink  sink;
+    std::uint64_t     rejects = 0, cancels = 0, canceled = 0, trades = 0;
+    for (const Command& c : commands) {
+        sink.clear();
+        engine.process(c, sink);
+        cancels += c.type == CommandType::Cancel;
+        for (const Event& e : sink.events) {
+            rejects += e.type == EventType::Reject;
+            trades += e.type == EventType::Trade;
+            canceled += e.type == EventType::Canceled && c.type == CommandType::Cancel;
+        }
+    }
+    EXPECT_EQ(rejects, 0u);
+    EXPECT_EQ(canceled, cancels);          // every cancel removed a real order
+    EXPECT_GT(cancels, commands.size() / 5);
+    EXPECT_GT(trades, commands.size() / 10);
+    for (InstrumentId id = 0; id < load.instruments; ++id) {
+        EXPECT_GT(engine.book(id).order_count(), 800u);
+        EXPECT_LT(engine.book(id).order_count(), 1'200u);
+    }
+    EXPECT_EQ(sim::generate(load, book), commands); // same config, same stream
+}
+
 class Differential : public ::testing::TestWithParam<std::uint64_t> {};
 
 TEST_P(Differential, FastEngineMatchesReference) {
