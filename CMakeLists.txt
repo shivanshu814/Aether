@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------- Options ----------
 option(AETHER_BUILD_TESTS "Build tests" ON)
+option(AETHER_BUILD_BENCH "Build the benchmark" OFF)
 option(AETHER_NATIVE "Tune for the build machine (-mcpu/-march=native)" OFF)
 set(AETHER_SANITIZER "" CACHE STRING "e.g. address,undefined  or  thread")
 
@@ -39,6 +40,10 @@ target_compile_options(aether_warnings INTERFACE
 # ---------- Code ----------
 add_subdirectory(libs)
 add_subdirectory(apps)
+
+if(AETHER_BUILD_BENCH)
+    add_subdirectory(bench)
+endif()
 
 if(AETHER_BUILD_TESTS)
     enable_testing()

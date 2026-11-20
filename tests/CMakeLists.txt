@@ -11,8 +11,8 @@ add_executable(unit_tests
     unit/core/test_core.cpp
     unit/core/test_event_sink.cpp
     unit/memory/test_pool.cpp
-    unit/concurrency/test_spsc_ring.cpp
     unit/book/test_book_parts.cpp
+    unit/concurrency/test_spsc_ring.cpp
     unit/engine/test_engine.cpp
     scenario/test_matching.cpp
     differential/test_differential.cpp
@@ -22,14 +22,14 @@ target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(unit_tests PRIVATE
     aether::core
     aether::memory
+    aether::concurrency
     aether::reference
     aether::book
-    aether::concurrency
+    aether::engine
     aether::journal
     aether::sim
     aether::runtime
-    aether::engine
     aether::warnings
     GTest::gtest_main
 )
-gtest_discover_tests(unit_tests)
+gtest_discover_tests(unit_tests DISCOVERY_TIMEOUT 60)

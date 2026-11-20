@@ -20,6 +20,7 @@
             "inherits": "base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
+                "AETHER_BUILD_BENCH": "ON",
                 "AETHER_NATIVE": "ON"
             }
         },
