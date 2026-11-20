@@ -12,7 +12,7 @@ Headline numbers:
 | **Allocations per order** | Heap allocations on the hot path. Target in steady state: exactly **0** |
 
 Measured on an Apple M1 Pro: **60.5 M commands/sec** on one engine thread with p99 85 ns,
-p99.9 167 ns and **0** heap allocations per command; 263 to 275 M commands/sec across 8
+p99.9 167 ns and **0** heap allocations per command; 263 to 280 M commands/sec across 8
 sharded engine threads. Method, full tables and the limits of these numbers are in
 [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -580,9 +580,10 @@ flowchart LR
 ```
 
 `run_sharded` implements this and `aether_bench --shards N` measures it: aggregate
-throughput passes 200 M commands/sec at 6 engine threads and reaches 263 to 275 M at 8.
-Scaling is not linear (per-thread throughput falls from 60 M to about 34 M) because the
-threads share memory bandwidth and cache. The live `aetherd` pipeline still runs a single
+throughput passes 200 M commands/sec at 6 engine threads and reaches 263 to 280 M at 8.
+Scaling is not linear: the fastest shard stays at single-thread speed while the slowest
+drops to about 35 M. Measurements rule out cache size and memory bandwidth and point to
+scheduling, since macOS cannot pin threads to cores (see BENCHMARKS.md). The live `aetherd` pipeline still runs a single
 engine thread.
 
 ---

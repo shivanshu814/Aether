@@ -25,7 +25,7 @@ The full pipeline (gateway, engine and publisher threads joined by lock-free rin
 25.4 M commands/sec, or 15.4 M with every command journaled to disk first.
 
 Sharded by instrument across engine threads, with no locks and no shared state, aggregate
-throughput passes 200 M commands/sec at 6 threads and reaches 263 to 275 M at 8 threads.
+throughput passes 200 M commands/sec at 6 threads and reaches 263 to 280 M at 8 threads.
 
 Method, the four-instrument numbers, the optimisation log and the limits of these
 measurements (clock resolution, synthetic order flow, untuned macOS) are in

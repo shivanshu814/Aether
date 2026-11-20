@@ -141,8 +141,11 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
 
     std::printf("\nscaling: one engine thread per shard, %zu commands and %u instrument(s) per shard\n",
                 base.count, base.instruments);
-    std::printf("| shards | aggregate commands/sec | per shard    | allocations |\n");
-    std::printf("|--------|------------------------|--------------|-------------|\n");
+    // "until last shard" divides all commands by the time the slowest thread needed: the
+    // conservative figure. "sum of shard rates" adds up what each thread sustained on its own.
+    // They differ when the OS runs some threads slower than others.
+    std::printf("| shards | until last shard | sum of shard rates | slowest shard | fastest shard | allocations |\n");
+    std::printf("|--------|------------------|--------------------|---------------|---------------|-------------|\n");
     for (int n = 1; n <= max_shards; ++n) {
         const std::vector<std::vector<aether::Command>> streams(all_streams.begin(), all_streams.begin() + n);
         const std::vector<std::vector<aether::BookConfig>> instruments(
@@ -150,8 +153,11 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
         const double total = static_cast<double>(base.count) * n;
 
         aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams); // warm-up
-        std::vector<double> rates;
-        std::uint64_t       allocs = 0;
+        struct Pass {
+            double until_last = 0, sum_rates = 0, slowest = 0, fastest = 0;
+        };
+        std::vector<Pass> passes;
+        std::uint64_t     allocs = 0;
         for (int run = 0; run < runs; ++run) {
             // Engine construction and thread start-up allocate; that happens before the
             // clock starts but inside this window, so it is subtracted using an empty run.
@@ -163,14 +169,25 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
             const std::uint64_t before_empty = aether::bench::allocation_count();
             aether::run_sharded<aether::OrderBook, CountingSink>(instruments, empty);
             const std::uint64_t setup_only = aether::bench::allocation_count() - before_empty;
-
             allocs = with_work > setup_only ? with_work - setup_only : 0;
-            rates.push_back(total / result.seconds);
+
+            Pass pass;
+            pass.until_last = total / result.seconds;
+            pass.slowest    = 1e300;
+            for (const double seconds : result.shard_seconds) {
+                const double rate = static_cast<double>(base.count) / seconds;
+                pass.sum_rates += rate;
+                pass.slowest = std::min(pass.slowest, rate);
+                pass.fastest = std::max(pass.fastest, rate);
+            }
+            passes.push_back(pass);
         }
-        std::sort(rates.begin(), rates.end());
-        const double median = rates[rates.size() / 2];
-        std::printf("| %6d | %20.1f M | %10.1f M | %11" PRIu64 " |\n", n, median / 1e6, median / 1e6 / n,
-                    allocs);
+        std::sort(passes.begin(), passes.end(),
+                  [](const Pass& a, const Pass& b) { return a.until_last < b.until_last; });
+        const Pass& median = passes[passes.size() / 2];
+        std::printf("| %6d | %14.1f M | %16.1f M | %11.1f M | %11.1f M | %11" PRIu64 " |\n", n,
+                    median.until_last / 1e6, median.sum_rates / 1e6, median.slowest / 1e6,
+                    median.fastest / 1e6, allocs);
     }
 }
 

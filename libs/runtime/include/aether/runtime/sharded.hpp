@@ -44,8 +44,9 @@ inline std::vector<std::vector<BookConfig>> partition_instruments(std::span<cons
 
 template <class Sink>
 struct ShardedRun {
-    std::vector<Sink> sinks;       // one per shard, in shard order
-    double            seconds = 0; // wall time from the common start until the last shard finished
+    std::vector<Sink>   sinks;         // one per shard, in shard order
+    std::vector<double> shard_seconds; // how long each shard took for its own stream
+    double              seconds = 0;   // wall time from the common start until the last shard finished
 };
 
 // Runs one engine per shard, each on its own thread. Engines are built before the clock
@@ -86,6 +87,7 @@ ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_i
     Clock::time_point last = start;
     for (Slot& slot : slots) {
         result.sinks.push_back(slot.sink);
+        result.shard_seconds.push_back(std::chrono::duration<double>(slot.finished - start).count());
         if (slot.finished > last) last = slot.finished;
     }
     result.seconds = std::chrono::duration<double>(last - start).count();

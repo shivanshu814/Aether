@@ -73,21 +73,42 @@ hashes every output event.
 
 `aether_bench --shards 8`: one engine thread per shard, each with its own instrument and its
 own seeded stream of 5,000,000 commands, all released together. No locks and no shared
-state between shards. Throughput is total commands divided by the wall time until the
-**last** shard finishes. Two separate benchmark runs, each the median of 5 passes:
+state between shards. Median of 5 passes.
 
-| Engine threads | Aggregate commands/sec (run 1) | (run 2) | Per thread | Heap allocations |
-|---|---|---|---|---|
-| 1 | 60.0 M | 60.8 M | 60 M | 0 |
-| 2 | 96.0 M | 95.1 M | 48 M | 0 |
-| 4 | 168.1 M | 163.5 M | 41 M | 0 |
-| 6 | **211.1 M** | **229.9 M** | 37 M | 0 |
-| 8 | **274.6 M** | **263.3 M** | 34 M | 0 |
+Two ways of adding the threads up are shown, because they differ:
 
-The machine has 8 performance cores and 2 efficiency cores; beyond 8 threads the results
-become erratic, so they are not reported. Scaling is not linear: per-thread throughput
-falls from 60 M to about 34 M at 8 threads, because the threads share memory bandwidth and
-last-level cache, and macOS cannot pin them to cores.
+- **Until last shard:** all commands divided by the wall time until the slowest thread
+  finishes. This is the conservative figure and the one quoted elsewhere.
+- **Sum of shard rates:** what each thread sustained on its own stream, added together.
+
+| Engine threads | Until last shard | Sum of shard rates | Slowest shard | Fastest shard | Heap allocations |
+|---|---|---|---|---|---|
+| 1 | 59.5 M | 59.5 M | 59.5 M | 59.5 M | 0 |
+| 2 | 103.8 M | 111.1 M | 51.9 M | 59.2 M | 0 |
+| 4 | 161.3 M | 181.0 M | 40.3 M | 53.7 M | 0 |
+| 6 | **227.7 M** | 279.2 M | 38.0 M | 54.9 M | 0 |
+| 8 | **280.0 M** | 379.1 M | 35.0 M | 55.8 M | 0 |
+
+Across three separate benchmark runs the 8-thread "until last shard" figure was 263 M,
+275 M and 280 M commands/sec, and the 6-thread figure 211 M, 230 M and 228 M.
+
+### Why it does not scale linearly
+
+Even with 8 threads the fastest shard still runs at 54 to 56 M commands/sec, the same as a
+lone engine, while the slowest drops to about 35 M. So the engines do not slow each other
+down evenly; some threads are simply given less CPU. Three measurements narrow this down:
+
+| Test | Result | What it rules out |
+|---|---|---|
+| Shrinking the resting-order working set 100x (20,000 to 200 live orders) | no change in per-thread speed, at 1, 4 or 8 threads | cache capacity |
+| 8 threads only reading their command arrays, no engine | 2,267 M commands/sec, about 109 GB/s | memory bandwidth: the engines read about 13 GB/s |
+| Per-thread rates within one pass | 33 to 56 M at 8 threads; at 4 threads one pass had all four at 54 to 58 M and the next had 38 to 57 M | a fixed hardware limit |
+
+What is left is scheduling. The machine has 8 performance and 2 efficiency cores, macOS
+decides which thread runs where and cannot be told to pin them, and raising the thread
+priority class made no difference. With every thread on a performance core at single-thread
+speed the ceiling on this machine would be about 8 x 58 M = 460 M commands/sec. Reaching it
+needs an OS that can pin threads to isolated cores (Linux), which has not been measured.
 
 What sharding does and does not give:
 
@@ -119,7 +140,7 @@ Every change was measured before and after on the same machine and stream.
 | Reference book replaced by pool + intrusive FIFO + flat price arrays + bitmap | 17.2 M/s, 0.551 allocs | 57.6 M/s, 0 allocs | yes |
 | Pipeline: batched ring transfers (one atomic update per batch of up to 256), spin-then-yield waiting, and one hash multiply per field instead of per byte | 6.7 M/s | 25.4 M/s | yes |
 | Book: per-side state in an array indexed by side and a branch-free crossing test, so resting and cancelling do not branch on buy/sell | 57.6 M/s | 60.5 M/s | yes |
-| Sharding: one engine thread per group of instruments, no shared state | 60 M/s on 1 thread | 263 to 275 M/s on 8 threads | yes |
+| Sharding: one engine thread per group of instruments, no shared state | 60 M/s on 1 thread | 263 to 280 M/s on 8 threads | yes |
 | Profile-guided optimisation (clang `-fprofile-instr-use`) | 57.5 M/s | 59.2 M/s | no: about 3%, not worth a two-stage build |
 | Software prefetch of the id index and the order a few commands ahead | 57.9 M/s | 34.3 M/s | no: slower. The working set already fits in cache; the cost is branches, not memory |
 
