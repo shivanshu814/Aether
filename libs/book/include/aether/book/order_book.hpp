@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -17,6 +18,8 @@ namespace aether {
 // The fast order book. Same behaviour as RefOrderBook, event for event, but:
 //   price levels -> flat arrays indexed by (price - min_price), one per side
 //   best price   -> cached index, repaired with a bitmap when a level empties
+//   side         -> per-side state lives in an array indexed by side, so resting and
+//                   cancelling do not branch on buy/sell
 //   FIFO         -> intrusive list threaded through the orders themselves
 //   id lookup    -> vector indexed by order id
 //   orders       -> fixed pool allocated once
@@ -26,10 +29,7 @@ public:
     explicit OrderBook(const BookConfig& cfg)
         : cfg_(cfg),
           levels_(static_cast<std::size_t>(cfg.max_price - cfg.min_price + 1)),
-          bids_(levels_),
-          asks_(levels_),
-          bid_bits_(levels_),
-          ask_bits_(levels_),
+          sides_{BookSide(levels_), BookSide(levels_)},
           index_(static_cast<std::size_t>(cfg.id_capacity), nullptr),
           pool_(cfg.max_orders) {}
 
@@ -103,19 +103,31 @@ public:
 
     // ---- read-only views, used by tests ----
     std::optional<Price> best_bid() const {
-        return best_bid_ == kNone ? std::nullopt : std::optional<Price>(price_of(best_bid_));
+        const std::size_t best = sides_[kBid].best;
+        return best == kNone ? std::nullopt : std::optional<Price>(price_of(best));
     }
     std::optional<Price> best_ask() const {
-        return best_ask_ == kNone ? std::nullopt : std::optional<Price>(price_of(best_ask_));
+        const std::size_t best = sides_[kAsk].best;
+        return best == kNone ? std::nullopt : std::optional<Price>(price_of(best));
     }
     std::size_t order_count() const noexcept { return pool_.in_use(); }
     Qty         depth_at(Side side, Price price) const {
         if (!price_ok(price)) return 0;
-        return (side == Side::Buy ? bids_ : asks_)[index_of(price)].total;
+        return sides_[static_cast<std::size_t>(side)].levels[index_of(price)].total;
     }
 
 private:
     static constexpr std::size_t kNone = LevelBitmap::npos;
+    static constexpr std::size_t kBid  = static_cast<std::size_t>(Side::Buy);
+    static constexpr std::size_t kAsk  = static_cast<std::size_t>(Side::Sell);
+
+    // Everything one side of the book owns. sides_[kBid] holds the bids, sides_[kAsk] the asks.
+    struct BookSide {
+        explicit BookSide(std::size_t level_count) : levels(level_count), bits(level_count) {}
+        std::vector<PriceLevel> levels;
+        LevelBitmap             bits;
+        std::size_t             best = kNone; // index of the best non-empty level
+    };
 
     bool        price_ok(Price p) const noexcept { return p >= cfg_.min_price && p <= cfg_.max_price; }
     std::size_t index_of(Price p) const noexcept { return static_cast<std::size_t>(p - cfg_.min_price); }
@@ -125,17 +137,31 @@ private:
         return id < cfg_.id_capacity ? index_[id] : nullptr;
     }
 
+    // True if the incoming order can trade against the best level of the opposite side.
+    // Written without branching on side: for a passive order this is almost always false,
+    // so the single branch on the result predicts well.
+    bool crosses_best(const Command& c) const noexcept {
+        const bool        buy  = c.side == Side::Buy;
+        const std::size_t best = sides_[buy ? kAsk : kBid].best;
+        if (best == kNone) return false;
+        const Price price    = price_of(best);
+        const bool  in_limit = buy ? price <= c.price : price >= c.price;
+        return in_limit || c.order_type == OrderType::Market;
+    }
+
     template <EventSink S>
     void execute(const Command& c, S& sink) {
         sink.emit(ev::ack(c));
         Qty remaining = c.qty;
-        if (c.side == Side::Buy) {
-            match_buy(c, remaining, sink);
-        } else {
-            match_sell(c, remaining, sink);
+        if (crosses_best(c)) {
+            if (c.side == Side::Buy) {
+                match_buy(c, remaining, sink);
+            } else {
+                match_sell(c, remaining, sink);
+            }
+            if (remaining == 0) return;
         }
-        if (remaining == 0) return;
-        if (c.order_type == OrderType::Limit) {
+        if (c.order_type == OrderType::Limit) [[likely]] {
             rest(c, remaining);
             sink.emit(ev::rested(c, remaining));
         } else {
@@ -166,14 +192,15 @@ private:
     template <EventSink S>
     void match_buy(const Command& c, Qty& remaining, S& sink) {
         const bool market = c.order_type == OrderType::Market;
-        while (remaining > 0 && best_ask_ != kNone) {
-            const Price price = price_of(best_ask_);
+        BookSide&  asks   = sides_[kAsk];
+        while (remaining > 0 && asks.best != kNone) {
+            const Price price = price_of(asks.best);
             if (!market && price > c.price) break;
-            PriceLevel& level = asks_[best_ask_];
+            PriceLevel& level = asks.levels[asks.best];
             sweep_level(level, price, c, remaining, sink);
             if (level.empty()) {
-                ask_bits_.clear(best_ask_);
-                best_ask_ = ask_bits_.next_at_or_above(best_ask_ + 1);
+                asks.bits.clear(asks.best);
+                asks.best = asks.bits.next_at_or_above(asks.best + 1);
             }
         }
     }
@@ -182,14 +209,15 @@ private:
     template <EventSink S>
     void match_sell(const Command& c, Qty& remaining, S& sink) {
         const bool market = c.order_type == OrderType::Market;
-        while (remaining > 0 && best_bid_ != kNone) {
-            const Price price = price_of(best_bid_);
+        BookSide&  bids   = sides_[kBid];
+        while (remaining > 0 && bids.best != kNone) {
+            const Price price = price_of(bids.best);
             if (!market && price < c.price) break;
-            PriceLevel& level = bids_[best_bid_];
+            PriceLevel& level = bids.levels[bids.best];
             sweep_level(level, price, c, remaining, sink);
             if (level.empty()) {
-                bid_bits_.clear(best_bid_);
-                best_bid_ = best_bid_ == 0 ? kNone : bid_bits_.prev_at_or_below(best_bid_ - 1);
+                bids.bits.clear(bids.best);
+                bids.best = bids.best == 0 ? kNone : bids.bits.prev_at_or_below(bids.best - 1);
             }
         }
     }
@@ -203,31 +231,30 @@ private:
         o->instrument = c.instrument;
         o->side       = c.side;
 
-        const std::size_t i = index_of(c.price);
-        if (c.side == Side::Buy) {
-            bids_[i].push_back(o);
-            bid_bits_.set(i);
-            if (best_bid_ == kNone || i > best_bid_) best_bid_ = i;
-        } else {
-            asks_[i].push_back(o);
-            ask_bits_.set(i);
-            if (best_ask_ == kNone || i < best_ask_) best_ask_ = i;
-        }
+        const std::size_t i    = index_of(c.price);
+        const bool        buy  = c.side == Side::Buy;
+        BookSide&         side = sides_[static_cast<std::size_t>(c.side)];
+        side.levels[i].push_back(o);
+        side.bits.set(i);
+        // Best bid is the highest index, best ask the lowest. Selected, not branched.
+        const bool better = side.best == kNone || (buy ? i > side.best : i < side.best);
+        side.best         = better ? i : side.best;
         index_[c.order_id] = o;
     }
 
     void remove(Order* o) noexcept {
         PriceLevel*       level = o->level;
         const std::size_t i     = index_of(o->price);
-        const Side        side  = o->side;
+        BookSide&         side  = sides_[static_cast<std::size_t>(o->side)];
         level->unlink(o);
         if (level->empty()) {
-            if (side == Side::Buy) {
-                bid_bits_.clear(i);
-                if (i == best_bid_) best_bid_ = i == 0 ? kNone : bid_bits_.prev_at_or_below(i - 1);
-            } else {
-                ask_bits_.clear(i);
-                if (i == best_ask_) best_ask_ = ask_bits_.next_at_or_above(i + 1);
+            side.bits.clear(i);
+            if (i == side.best) { // the best level just emptied: find the next one
+                if (o->side == Side::Buy) {
+                    side.best = i == 0 ? kNone : side.bits.prev_at_or_below(i - 1);
+                } else {
+                    side.best = side.bits.next_at_or_above(i + 1);
+                }
             }
         }
         index_[o->id] = nullptr;
@@ -236,12 +263,7 @@ private:
 
     BookConfig              cfg_;
     std::size_t             levels_;
-    std::vector<PriceLevel> bids_;
-    std::vector<PriceLevel> asks_;
-    LevelBitmap             bid_bits_;
-    LevelBitmap             ask_bits_;
-    std::size_t             best_bid_ = kNone;
-    std::size_t             best_ask_ = kNone;
+    std::array<BookSide, 2> sides_;
     std::vector<Order*>     index_;
     Pool<Order>             pool_;
 };

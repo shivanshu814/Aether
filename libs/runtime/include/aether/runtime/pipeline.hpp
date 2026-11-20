@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <span>
@@ -17,6 +19,9 @@
 //
 // The engine thread is the only thread that touches the books, so no locks are needed and
 // the output is exactly the same as running the engine on one thread.
+//
+// Everything moves through the rings in batches: each side takes whatever is available
+// (up to kBatch) with one atomic update, instead of paying a cache-line hand-off per item.
 namespace aether {
 
 struct PipelineResult {
@@ -24,15 +29,40 @@ struct PipelineResult {
     std::uint64_t events = 0;
 };
 
-// Pushes events into an SPSC ring, spinning while the ring is full.
-struct RingSink {
-    SpscRing<Event>& ring;
+inline constexpr std::size_t kBatch = 256;
+
+// Collects events on the engine thread and pushes them to the ring a batch at a time.
+class BatchingRingSink {
+public:
+    explicit BatchingRingSink(SpscRing<Event>& ring) : ring_(ring) {}
 
     void emit(const Event& e) noexcept {
-        while (!ring.try_push(e)) std::this_thread::yield();
+        buffer_[size_++] = e;
+        if (size_ == buffer_.size()) flush();
     }
+
+    // Blocks (spinning) until everything buffered is in the ring.
+    void flush() noexcept {
+        std::size_t sent = 0;
+        Backoff     backoff;
+        while (sent < size_) {
+            const std::size_t n = ring_.try_push_n(buffer_.data() + sent, size_ - sent);
+            if (n == 0) {
+                backoff.pause();
+            } else {
+                sent += n;
+                backoff.reset();
+            }
+        }
+        size_ = 0;
+    }
+
+private:
+    SpscRing<Event>&          ring_;
+    std::array<Event, kBatch> buffer_{};
+    std::size_t               size_ = 0;
 };
-static_assert(EventSink<RingSink>);
+static_assert(EventSink<BatchingRingSink>);
 
 // Runs `commands` through gateway -> engine -> publisher on separate threads and returns the
 // hash of everything the publisher received. If `journal` is given, each command is written
@@ -48,41 +78,75 @@ PipelineResult run_pipeline(std::span<const BookConfig> instruments,
     HashSink          published;
 
     std::thread engine_thread([&] {
-        Engine<Book> engine(instruments);
-        RingSink     sink{outbound};
-        Command      c{};
+        Engine<Book>                engine(instruments);
+        BatchingRingSink            sink(outbound);
+        std::array<Command, kBatch> batch{};
+        Backoff                     backoff;
+        bool                        draining = false;
         while (true) {
-            if (inbound.try_pop(c)) {
-                engine.process(c, sink);
+            const std::size_t n = inbound.try_pop_n(batch.data(), batch.size());
+            if (n != 0) {
+                for (std::size_t i = 0; i < n; ++i) engine.process(batch[i], sink);
+                sink.flush(); // never sit on events while waiting for more input
+                backoff.reset();
+            } else if (draining) {
+                break; // the flag was already set before this empty pop: nothing is left
             } else if (gateway_done.load(std::memory_order_acquire)) {
-                // The flag was set after the last push, so one more pop sees everything.
-                while (inbound.try_pop(c)) engine.process(c, sink);
-                break;
+                draining = true; // pop once more; the last push happened before the flag
             } else {
-                std::this_thread::yield();
+                backoff.pause();
             }
         }
         engine_done.store(true, std::memory_order_release);
     });
 
     std::thread publisher_thread([&] {
-        Event e{};
+        std::array<Event, kBatch> batch{};
+        Backoff                   backoff;
+        bool                      draining = false;
         while (true) {
-            if (outbound.try_pop(e)) {
-                published.emit(e);
-            } else if (engine_done.load(std::memory_order_acquire)) {
-                while (outbound.try_pop(e)) published.emit(e);
+            const std::size_t n = outbound.try_pop_n(batch.data(), batch.size());
+            if (n != 0) {
+                for (std::size_t i = 0; i < n; ++i) published.emit(batch[i]);
+                backoff.reset();
+            } else if (draining) {
                 break;
+            } else if (engine_done.load(std::memory_order_acquire)) {
+                draining = true;
             } else {
-                std::this_thread::yield();
+                backoff.pause();
             }
         }
     });
 
     // Gateway + sequencer: journal first, then hand to the engine, strictly in order.
-    for (const Command& c : commands) {
-        if (journal != nullptr) journal->append(c);
-        while (!inbound.try_push(c)) std::this_thread::yield();
+    std::size_t sent = 0;
+    Backoff     backoff;
+    while (sent < commands.size()) {
+        const std::size_t want = std::min(kBatch, commands.size() - sent);
+        if (journal != nullptr) {
+            // Journal a chunk, then push exactly that chunk before journaling any more.
+            for (std::size_t i = 0; i < want; ++i) journal->append(commands[sent + i]);
+            std::size_t pushed = 0;
+            while (pushed < want) {
+                const std::size_t n = inbound.try_push_n(commands.data() + sent + pushed, want - pushed);
+                if (n == 0) {
+                    backoff.pause();
+                } else {
+                    pushed += n;
+                    backoff.reset();
+                }
+            }
+            sent += want;
+        } else {
+            const std::size_t n = inbound.try_push_n(commands.data() + sent, want);
+            if (n == 0) {
+                backoff.pause();
+            } else {
+                sent += n;
+                backoff.reset();
+            }
+        }
     }
     gateway_done.store(true, std::memory_order_release);
 

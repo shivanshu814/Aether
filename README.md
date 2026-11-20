@@ -13,15 +13,18 @@ stream, so any run can be replayed from the log and checked hash-for-hash.
 Measured on an Apple M1 Pro with Apple clang 21 (`-O3 -mcpu=native`), 5,000,000 commands,
 one instrument, engine only on a single thread:
 
-| Engine | Orders/sec | p99 | p99.9 | Heap allocations per order |
+| Engine | Commands/sec | p99 | p99.9 | Heap allocations per command |
 |---|---|---|---|---|
-| Reference (`std::map`) | 17.1 M | 335 ns | 591 ns | 0.551 |
-| Fast (pool + flat array) | **57.6 M** | **85 ns** | **167 ns** | **0** |
+| Reference (`std::map`) | 17.2 M | 335 ns | 591 ns | 0.551 |
+| Fast (pool + flat array) | **60.5 M** | **85 ns** | **167 ns** | **0** |
 
-The fast engine is 3.4x faster, has a 3.5x lower p99.9 and makes zero heap allocations after
+The fast engine is 3.5x faster, has a 3.5x lower p99.9 and makes zero heap allocations after
 start-up. Both engines produce identical output, event for event.
 
-Method, the four-instrument and threaded-pipeline numbers, and the limits of these
+The full pipeline (gateway, engine and publisher threads joined by lock-free rings) runs at
+25.4 M commands/sec, or 15.4 M with every command journaled to disk first.
+
+Method, the four-instrument numbers, the optimisation log and the limits of these
 measurements (clock resolution, synthetic order flow, untuned macOS) are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -36,13 +39,14 @@ measurements (clock resolution, synthetic order flow, untuned macOS) are in
 - **Deterministic replay.** Every sequenced command is journaled as a 48-byte record.
   `aether_replay` re-runs a log into a fresh engine and prints an FNV-1a hash of the output.
 - **Threaded pipeline.** Gateway/sequencer, engine and publisher threads joined by lock-free
-  single-producer single-consumer ring buffers. Only the engine thread touches the books.
+  single-producer single-consumer ring buffers, with batched hand-off. Only the engine thread
+  touches the books.
 - **Benchmark harness.** Seeded load generator, log-scale latency histogram and a counting
   `operator new`.
 
 ## How it is tested
 
-81 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
+83 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
 Release, and Debug with ThreadSanitizer.
 
 - **Scenario tests** run every hand-written case against both books, including the design

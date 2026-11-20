@@ -63,3 +63,56 @@ TEST(SpscRing, TwoThreadsDeliverEverythingInOrder) {
     EXPECT_TRUE(in_order);
     EXPECT_FALSE(ring.try_pop(value));
 }
+
+TEST(SpscRing, BatchPushAndPopMoveWhatFits) {
+    SpscRing<int> ring(8);
+    const int     in[6] = {1, 2, 3, 4, 5, 6};
+    EXPECT_EQ(ring.try_push_n(in, 6), 6u);
+    EXPECT_EQ(ring.try_push_n(in, 6), 2u); // only two slots were left
+    int out[16] = {};
+    EXPECT_EQ(ring.try_pop_n(out, 3), 3u);
+    EXPECT_EQ(out[0], 1);
+    EXPECT_EQ(out[2], 3);
+    EXPECT_EQ(ring.try_pop_n(out, 16), 5u); // 4,5,6 then 1,2
+    EXPECT_EQ(out[0], 4);
+    EXPECT_EQ(out[3], 1);
+    EXPECT_EQ(out[4], 2);
+    EXPECT_EQ(ring.try_pop_n(out, 16), 0u);
+    EXPECT_EQ(ring.try_push_n(in, 0), 0u);
+}
+
+// Batches of uneven size on both sides, across two threads.
+TEST(SpscRing, TwoThreadsBatchedDeliverEverythingInOrder) {
+    constexpr std::uint64_t kCount = 500'000;
+    SpscRing<std::uint64_t> ring(256);
+
+    std::thread producer([&] {
+        std::uint64_t next = 0;
+        std::uint64_t chunk[37];
+        while (next < kCount) {
+            std::size_t want = 0;
+            while (want < 37 && next + want < kCount) {
+                chunk[want] = next + want;
+                ++want;
+            }
+            std::size_t sent = 0;
+            while (sent < want) {
+                const std::size_t n = ring.try_push_n(chunk + sent, want - sent);
+                if (n == 0) std::this_thread::yield();
+                sent += n;
+            }
+            next += want;
+        }
+    });
+
+    std::uint64_t expected = 0;
+    std::uint64_t out[64];
+    bool          in_order = true;
+    while (expected < kCount) {
+        const std::size_t n = ring.try_pop_n(out, 64);
+        if (n == 0) std::this_thread::yield();
+        for (std::size_t i = 0; i < n; ++i) in_order = in_order && out[i] == expected++;
+    }
+    producer.join();
+    EXPECT_TRUE(in_order);
+}

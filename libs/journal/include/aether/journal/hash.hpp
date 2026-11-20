@@ -6,15 +6,15 @@
 
 namespace aether {
 
-// FNV-1a, 64-bit. Values are fed one byte at a time, low byte first, so the result does not
-// depend on the machine's byte order or on struct padding.
+// FNV-1a over 64-bit words: xor the value in, multiply by the FNV prime. Classic FNV-1a feeds
+// one byte per step; feeding a whole field per step is 8x fewer multiplies, and every value
+// here is an integer field, so the result does not depend on byte order or struct padding.
+// It is used to check that two runs produced the same events, not as a general-purpose hash.
 class Fnv1a {
 public:
     constexpr void mix(std::uint64_t value) noexcept {
-        for (int i = 0; i < 8; ++i) {
-            hash_ ^= (value >> (8 * i)) & 0xFFU;
-            hash_ *= 1099511628211ULL;
-        }
+        hash_ ^= value;
+        hash_ *= 1099511628211ULL;
     }
     constexpr std::uint64_t value() const noexcept { return hash_; }
 

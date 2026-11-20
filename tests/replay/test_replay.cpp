@@ -18,7 +18,7 @@ namespace {
 
 // Pinned output of make_stream(20261120, 200'000, 4). See the GoldenHash test.
 constexpr std::uint64_t GOLDEN_EVENTS = 362'903;
-constexpr std::uint64_t GOLDEN_HASH   = 5132975563917192782ULL;
+constexpr std::uint64_t GOLDEN_HASH   = 6383623603604726376ULL;
 
 struct Stream {
     std::vector<BookConfig> instruments;

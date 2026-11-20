@@ -84,6 +84,7 @@ public:
     LogWriter(const std::string& path, std::span<const BookConfig> instruments)
         : file_(std::fopen(path.c_str(), "wb")) {
         if (file_ == nullptr) throw std::runtime_error("cannot open log for writing: " + path);
+        std::setvbuf(file_, nullptr, _IOFBF, std::size_t{1} << 20); // 1 MiB: fewer write() calls
         LogHeader header{};
         header.instrument_count = static_cast<std::uint32_t>(instruments.size());
         write(&header, sizeof(header));

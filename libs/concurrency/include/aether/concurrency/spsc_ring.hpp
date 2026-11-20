@@ -4,9 +4,38 @@
 #include <bit>
 #include <cstddef>
 #include <memory>
+#include <thread>
 #include <type_traits>
 
 namespace aether {
+
+// Tells the CPU this is a spin-wait loop: cheaper than a syscall, kinder than a hot spin.
+inline void cpu_relax() noexcept {
+#if defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+
+// Spin briefly, then start giving the core away. Keeps latency low when the other side is
+// about to act, without starving it when there are fewer cores than threads.
+class Backoff {
+public:
+    void pause() noexcept {
+        if (spins_ < kSpinLimit) {
+            ++spins_;
+            cpu_relax();
+        } else {
+            std::this_thread::yield();
+        }
+    }
+    void reset() noexcept { spins_ = 0; }
+
+private:
+    static constexpr unsigned kSpinLimit = 256;
+    unsigned                  spins_     = 0;
+};
 
 // Lock-free single-producer single-consumer ring buffer.
 //
@@ -48,6 +77,34 @@ public:
         out = buffer_[head & mask_];
         head_.store(head + 1, std::memory_order_release);
         return true;
+    }
+
+    // Batch versions: one atomic store publishes the whole batch, so the other core sees one
+    // cache-line transfer per batch instead of one per item. Both return how many items moved.
+    std::size_t try_push_n(const T* items, std::size_t count) noexcept {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        std::size_t       free = capacity_ - (tail - head_cache_);
+        if (free < count) {
+            head_cache_ = head_.load(std::memory_order_acquire);
+            free        = capacity_ - (tail - head_cache_);
+        }
+        const std::size_t n = count < free ? count : free;
+        for (std::size_t i = 0; i < n; ++i) buffer_[(tail + i) & mask_] = items[i];
+        if (n != 0) tail_.store(tail + n, std::memory_order_release);
+        return n;
+    }
+
+    std::size_t try_pop_n(T* out, std::size_t max_count) noexcept {
+        const std::size_t head      = head_.load(std::memory_order_relaxed);
+        std::size_t       available = tail_cache_ - head;
+        if (available == 0) {
+            tail_cache_ = tail_.load(std::memory_order_acquire);
+            available   = tail_cache_ - head;
+        }
+        const std::size_t n = max_count < available ? max_count : available;
+        for (std::size_t i = 0; i < n; ++i) out[i] = buffer_[(head + i) & mask_];
+        if (n != 0) head_.store(head + n, std::memory_order_release);
+        return n;
     }
 
     std::size_t capacity() const noexcept { return capacity_; }
