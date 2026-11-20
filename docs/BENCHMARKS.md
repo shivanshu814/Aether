@@ -44,7 +44,8 @@ generator's nominal percentages):
 ## Method
 
 - Each engine gets one untimed warm-up pass, then timed passes on a fresh engine.
-  **Commands/sec** is the median pass.
+  **Commands/sec** is the median pass. Commands go through `Engine::process_batch`, which
+  prefetches the id-index slot 12 commands ahead and the order 4 commands ahead.
 - **Latency** is a separate pass with `steady_clock` read before and after every command,
   recorded into a fixed log-scale histogram (no allocation while measuring).
 - **Allocations** are counted by a replacement global `operator new`, inside the timed loop
@@ -54,23 +55,23 @@ generator's nominal percentages):
 
 ## Results: engine only (single thread)
 
-1 instrument, 5,000,000 commands. Three separate benchmark runs; the fast engine's figures
-were the same in all three.
+1 instrument, 5,000,000 commands. Three separate benchmark runs (62.5, 63.7 and 62.9 M
+commands/sec); the latency figures were the same in all three.
 
 | Engine | Commands/sec | p50 | p99 | p99.9 | Heap allocations per command |
 |---|---|---|---|---|---|
 | Reference (`std::map` + `std::deque` + `std::unordered_map`) | 4.2 M | 125 ns | 1,007 to 1,087 ns | 3,007 to 4,031 ns | 0.576 (2,880,277 total) |
-| Fast (pool + intrusive FIFO + flat price array + bitmap) | **61.9 M** | 41 ns | **83 ns** | **167 ns** | **0** (0 total) |
+| Fast (pool + intrusive FIFO + flat price array + bitmap) | **63 M** | 41 ns | **83 ns** | **167 ns** | **0** (0 total) |
 
 4 instruments, 5,000,000 commands, median of 5 benchmark runs:
 
 | Engine | Commands/sec | p99 | p99.9 (median) | p99.9 (range over 5 runs) | Heap allocations per command |
 |---|---|---|---|---|---|
 | Reference | 3.8 M | 1,215 ns | 4,479 ns | 4,095 to 4,863 ns | 0.581 |
-| Fast | **45.2 M** | **167 ns** | **295 ns** | 251 to 423 ns | **0** |
+| Fast | **57.6 M** | **125 ns** | **251 ns** | 211 to 335 ns | **0** |
 
-Fast vs reference: 14.7x the throughput, 13x lower p99 and about 20x lower p99.9 on one
-instrument; 12x the throughput, 7x lower p99 and 15x lower median p99.9 on four.
+Fast vs reference: 15x the throughput, 13x lower p99 and about 20x lower p99.9 on one
+instrument; 15x the throughput, 10x lower p99 and 18x lower median p99.9 on four.
 
 **Read this comparison for what it is.** The reference book is the test oracle: it is
 written to be obviously correct, not fast. Its cancel does a linear scan of the queue at
@@ -87,14 +88,16 @@ hashes every output event.
 
 | Mode | End-to-end throughput |
 |---|---|
-| Three threads | 22.6 M commands/sec |
-| Three threads, every command journaled to disk before the engine sees it | 15.7 M commands/sec |
+| Three threads | 27.6 M commands/sec |
+| Three threads, every command journaled to disk before the engine sees it | 15.5 M commands/sec |
 
 ## Results: scaling across cores (sharding)
 
 `aether_bench --shards 8`: one engine thread per shard, each with its own instrument and its
 own seeded stream of 5,000,000 commands, all released together. No locks and no shared
 state between shards. Each figure is the median of 5 passes; two separate runs are shown.
+Shards call `process()` per command, without the lookahead prefetch: with 8 threads the
+prefetches cost more than they save (about 240 M against 270 M aggregate, measured).
 
 Two ways of adding the threads up, because they differ:
 
@@ -104,11 +107,14 @@ Two ways of adding the threads up, because they differ:
 
 | Engine threads | Until last shard (run 1 / run 2) | Sum of shard rates | Slowest shard | Fastest shard | Heap allocations |
 |---|---|---|---|---|---|
-| 1 | 62.3 M / 58.6 M | 62.3 M | 62.3 M | 62.3 M | 0 |
-| 2 | 96.7 M / 95.6 M | 104.1 M | 48.3 M | 55.8 M | 0 |
-| 4 | 152.2 M / 151.9 M | 174.3 M | 38.1 M | 50.8 M | 0 |
-| 6 | **214.2 M / 206.8 M** | 252.1 M | 35.7 M | 49.0 M | 0 |
-| 8 | **271.3 M / 269.3 M** | 340.8 M | 33.9 M | 51.1 M | 0 |
+| 1 | 61.6 M / 62.9 M | 61.6 M | 61.6 M | 61.6 M | 0 |
+| 2 | 96.9 M / 105.6 M | 103.5 M | 48.4 M | 55.1 M | 0 |
+| 4 | 152.5 M / 145.6 M | 173.4 M | 38.1 M | 52.2 M | 0 |
+| 6 | **216.2 M / 213.2 M** | 252.3 M | 36.0 M | 49.3 M | 0 |
+| 8 | **285.7 M / 255.8 M** | 331.7 M | 35.7 M | 49.7 M | 0 |
+
+Across five separate runs on this page's history the 8-thread figure has ranged from 256 M
+to 286 M; "about 270 M" is the fair summary.
 
 ### Why it does not scale linearly
 
@@ -132,7 +138,7 @@ To test that, the benchmark was built and run inside a Linux virtual machine on 
 M1 Pro: OrbStack, kernel 6.17, Debian 12, g++ 12.2, `-O3 -mcpu=native`, 10 virtual CPUs.
 `--pin 1` binds shard `s` to CPU `s` with `pthread_setaffinity_np`. One run each.
 
-| Engine threads | macOS | Linux VM, not pinned | Linux VM, pinned |
+| Engine threads | macOS (earlier run) | Linux VM, not pinned | Linux VM, pinned |
 |---|---|---|---|
 | 1 | 62.3 M | 54.4 M | 56.8 M |
 | 2 | 96.7 M | 88.6 M | 71.9 M |
@@ -179,7 +185,8 @@ Single thread, fast engine, to see how much room is left:
 | Burst of cancels only, random resting order | 7.1 ns |
 | Inserts and cancels in runs of 64 of each, no trades | 7.4 ns |
 | The same inserts and cancels randomly interleaved | 10.3 ns |
-| Full benchmark mix (trades, modifies, market and IOC orders) | 16.2 ns |
+| Full benchmark mix (trades, modifies, market and IOC orders), no prefetch | 16.2 ns |
+| Full benchmark mix with the lookahead prefetch (`process_batch`) | 15.9 ns |
 
 Random order flow makes the command type unpredictable, and that alone costs about 3 ns per
 command (10.3 against 7.4). Matching, modifies and the crossing test account for the rest.
@@ -200,8 +207,10 @@ were measured before the workload fix below and are kept as measured.
 | **Workload fix.** The generator did not know when orders were filled, so 90% of its cancels and modifies named orders that were already gone and were rejected almost for free, and the book held about 2,000 orders instead of 20,000. It now tracks resting orders through a reference engine | fast 60.5 M/s, reference 17.2 M/s | fast 61.9 M/s, reference 4.2 M/s | yes |
 | Pool: stack of free pointers instead of a free list threaded through the slots, which made each allocation wait on a load from the previous slot | insert burst 11.5 ns | insert burst 7.1 ns; full mix unchanged | yes |
 | Price level: sentinel ring, so link and unlink have no branches; branch-free bitmap clear | 60.2 M/s | 59.7 to 61.7 M/s (no measurable change) | yes: simpler code, no slower |
+| Lookahead prefetch, second attempt: `process_batch` prefetches the id-index slot 12 commands ahead and the order 4 ahead, with no branches in the hint (the first attempt branched on the lookahead command and was much slower) | 1 instrument 61.9 M/s; 4 instruments 45.2 M/s; pipeline 22.6 M/s | 63 M/s; 57.6 M/s; 27.6 M/s | yes, except in the sharded runner, where 8 threads of prefetches made it slower (240 M against 270 M) |
+| Compiler flags: `-fomit-frame-pointer`, `-fno-exceptions -fno-rtti`, `-O2` | 61 M/s | 59 to 61 M/s | no: no difference |
 | Profile-guided optimisation (clang `-fprofile-instr-use`) (old stream) | 57.5 M/s | 59.2 M/s | no: about 3%, not worth a two-stage build |
-| Software prefetch of the id index and the order a few commands ahead (old stream) | 57.9 M/s | 34.3 M/s | no: much slower |
+| Software prefetch, first attempt: hints that branched on the type of the lookahead command (old stream) | 57.9 M/s | 34.3 M/s | no: much slower. The branches in the hint cost more than the misses they hid |
 
 Two things in earlier versions of this page were wrong and have been corrected: the
 four-instrument p99.9 comparison came from a single noisy run, and the scaling loss was

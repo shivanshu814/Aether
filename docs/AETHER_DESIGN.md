@@ -11,7 +11,7 @@ Headline numbers:
 | **p50 / p99 / p99.9** | Latency per command: typical case, 1-in-100 worst, 1-in-1000 worst |
 | **Allocations per order** | Heap allocations on the hot path. Target in steady state: exactly **0** |
 
-Measured on an Apple M1 Pro: **61.9 M commands/sec** on one engine thread with p99 83 ns,
+Measured on an Apple M1 Pro: **63 M commands/sec** on one engine thread with p99 83 ns,
 p99.9 167 ns and **0** heap allocations per command; about 270 M commands/sec across 8
 sharded engine threads. Method, full tables and the limits of these numbers are in
 [BENCHMARKS.md](BENCHMARKS.md).
@@ -885,6 +885,14 @@ flowchart BT
     apps --> reference
     apps --> sim
 ```
+
+`Engine::process_batch` takes a span of commands and, for each one, prefetches the id-index
+slot of the command 12 ahead and the order of the command 4 ahead. The hints are branch-free
+(the instrument is clamped, an empty slot prefetches nullptr, which is a no-op), because a
+first attempt that branched on the lookahead command's type was much slower. The threaded
+pipeline uses it on every batch it drains from the ring. Measured: +2% on one instrument,
++27% on four, +22% in the pipeline; it is not used in the sharded runner, where eight
+threads of prefetches made things slower.
 
 `engine` does not depend on `book` or `reference`: `Engine<Book>` is a template, and the book
 type is chosen where it is used. That is what lets the same engine run the oracle and the

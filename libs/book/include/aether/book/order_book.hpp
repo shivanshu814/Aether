@@ -102,6 +102,17 @@ public:
         execute(fresh, sink);
     }
 
+    // ---- prefetch hints, used by Engine::process_batch ----
+    // Both are branch-free and only issue prefetches; a stale or useless hint is harmless.
+    // The id-index slot is needed by every command: cancels and modifies read it, new
+    // orders write it. Prefetching nullptr (slot empty) is a no-op.
+    void prefetch_index_slot(OrderId id) const noexcept {
+        __builtin_prefetch(&index_[id < cfg_.id_capacity ? id : 0], 1);
+    }
+    void prefetch_order(OrderId id) const noexcept {
+        __builtin_prefetch(index_[id < cfg_.id_capacity ? id : 0], 1);
+    }
+
     // ---- read-only views, used by tests ----
     std::optional<Price> best_bid() const {
         const std::size_t best = sides_[kBid].best;

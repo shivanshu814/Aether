@@ -16,9 +16,9 @@ one instrument, engine only on a single thread:
 | Engine | Commands/sec | p99 | p99.9 | Heap allocations per command |
 |---|---|---|---|---|
 | Reference (`std::map`) | 4.2 M | about 1,050 ns | about 3,700 ns | 0.576 |
-| Fast (pool + flat array) | **61.9 M** | **83 ns** | **167 ns** | **0** |
+| Fast (pool + flat array) | **63 M** | **83 ns** | **167 ns** | **0** |
 
-The fast engine has 14.7x the throughput and about 20x lower p99.9, and makes zero heap
+The fast engine has 15x the throughput and about 20x lower p99.9, and makes zero heap
 allocations after start-up. Both engines produce identical output, event for event. The
 reference is the test oracle, written to be obviously correct rather than fast (its cancel
 scans the queue at a price), so this is the gain over the simplest correct book, not over
@@ -28,7 +28,7 @@ The stream is 62% new orders, 33% cancels and 5% modifies against a book of abou
 resting orders; every cancel and modify hits a real order.
 
 The full pipeline (gateway, engine and publisher threads joined by lock-free rings) runs at
-22.6 M commands/sec, or 15.7 M with every command journaled to disk first.
+27.6 M commands/sec, or 15.5 M with every command journaled to disk first.
 
 Sharded by instrument across engine threads, with no locks and no shared state, aggregate
 throughput passes 200 M commands/sec at 6 threads and reaches about 270 M at 8 threads.
@@ -41,6 +41,9 @@ measurements (clock resolution, synthetic order flow, untuned macOS) are in
 
 - **Order types:** Limit, Market and IOC, plus cancel and modify. Reducing quantity keeps
   time priority; changing price or increasing quantity loses it.
+- **Lookahead prefetch.** `Engine::process_batch` prefetches the id-index slot and the order of
+  commands a few places ahead, with no branches in the hint, so a cancel's dependent cache
+  misses are in flight before the command is reached.
 - **Two order books with the same behaviour.** `RefOrderBook` is a simple `std::map` book
   kept as the test oracle. `OrderBook` is the fast one: tick-indexed price arrays, an
   intrusive FIFO ring per price level, a bitmap to find the next non-empty level, an
@@ -55,7 +58,7 @@ measurements (clock resolution, synthetic order flow, untuned macOS) are in
 
 ## How it is tested
 
-87 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
+89 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
 Release, and Debug with ThreadSanitizer.
 
 - **Scenario tests** run every hand-written case against both books, including the design

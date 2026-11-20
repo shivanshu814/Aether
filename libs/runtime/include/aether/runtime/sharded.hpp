@@ -96,6 +96,9 @@ ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_i
             Sink&                       sink     = slots[s].sink;
             ready.fetch_add(1, std::memory_order_release);
             while (!go.load(std::memory_order_acquire)) cpu_relax();
+            // Plain process(), not process_batch(): with 8 threads sharing the cache and
+            // memory system, the lookahead prefetches cost more than they save (measured:
+            // about 240 M against 270 M aggregate at 8 threads).
             for (const Command& c : commands) engine.process(c, sink);
             slots[s].finished = Clock::now();
         });

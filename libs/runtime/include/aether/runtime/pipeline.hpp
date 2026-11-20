@@ -86,7 +86,7 @@ PipelineResult run_pipeline(std::span<const BookConfig> instruments,
         while (true) {
             const std::size_t n = inbound.try_pop_n(batch.data(), batch.size());
             if (n != 0) {
-                for (std::size_t i = 0; i < n; ++i) engine.process(batch[i], sink);
+                engine.process_batch(std::span<const Command>(batch.data(), n), sink);
                 sink.flush(); // never sit on events while waiting for more input
                 backoff.reset();
             } else if (draining) {
@@ -161,7 +161,7 @@ PipelineResult run_single_threaded(std::span<const BookConfig> instruments,
                                    std::span<const Command> commands) {
     Engine<Book> engine(instruments);
     HashSink     sink;
-    for (const Command& c : commands) engine.process(c, sink);
+    engine.process_batch(commands, sink);
     return {sink.hash(), sink.count};
 }
 

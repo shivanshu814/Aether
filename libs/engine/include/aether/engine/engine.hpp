@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <span>
 #include <vector>
 
@@ -39,6 +40,36 @@ public:
         case CommandType::New:    book.on_new(c, sink); break;
         case CommandType::Cancel: book.on_cancel(c, sink); break;
         case CommandType::Modify: book.on_modify(c, sink); break;
+        }
+    }
+
+    // Same result as calling process() on each command in order, but looks ahead: the
+    // id-index slot of the command kFar ahead and the order of the command kNear ahead are
+    // prefetched, so a cancel's two dependent cache misses are already in flight when the
+    // command is reached. Hints are branch-free; the instrument is clamped, never branched on.
+    template <EventSink S>
+        requires BookFor<Book, S>
+    void process_batch(std::span<const Command> commands, S& sink) {
+        if constexpr (requires(const Book& b, OrderId id) { b.prefetch_index_slot(id); b.prefetch_order(id); }) {
+#ifndef AETHER_PREFETCH_FAR
+#define AETHER_PREFETCH_FAR 12
+#define AETHER_PREFETCH_NEAR 4
+#endif
+            constexpr std::size_t kFar  = AETHER_PREFETCH_FAR;
+            constexpr std::size_t kNear = AETHER_PREFETCH_NEAR;
+            const std::size_t     n     = commands.size();
+            const std::size_t     last  = books_.size() - 1;
+            std::size_t           i     = 0;
+            for (; i + kFar < n; ++i) {
+                const Command& far  = commands[i + kFar];
+                const Command& near = commands[i + kNear];
+                books_[std::min<std::size_t>(far.instrument, last)].prefetch_index_slot(far.order_id);
+                books_[std::min<std::size_t>(near.instrument, last)].prefetch_order(near.order_id);
+                process(commands[i], sink);
+            }
+            for (; i < n; ++i) process(commands[i], sink);
+        } else {
+            for (const Command& c : commands) process(c, sink);
         }
     }
 

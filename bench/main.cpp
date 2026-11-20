@@ -8,7 +8,8 @@
 //
 // For each engine:
 //   1. warm-up pass over the whole stream (result discarded)
-//   2. throughput: N timed passes with no per-command clock; median orders/sec.
+//   2. throughput: N timed passes with no per-command clock; median orders/sec. Commands go
+//      through Engine::process_batch, which prefetches a few commands ahead.
 //      Heap allocations are counted inside the timed loop only.
 //   3. latency: one pass with steady_clock around every command, into a fixed histogram.
 // Commands are generated up front from a seeded RNG, so the generator is never timed.
@@ -63,7 +64,7 @@ Result measure(const char* name, const std::vector<aether::BookConfig>& instrume
     { // warm-up: fault in pages, warm caches and the branch predictor
         aether::Engine<Book> engine(instruments);
         CountingSink         sink;
-        for (const aether::Command& c : commands) engine.process(c, sink);
+        engine.process_batch(commands, sink);
     }
 
     std::vector<double> rates;
@@ -72,7 +73,7 @@ Result measure(const char* name, const std::vector<aether::BookConfig>& instrume
         CountingSink         sink;
         const std::uint64_t  allocs_before = aether::bench::allocation_count();
         const auto           start         = Clock::now();
-        for (const aether::Command& c : commands) engine.process(c, sink);
+        engine.process_batch(commands, sink);
         const std::chrono::duration<double> elapsed = Clock::now() - start;
         const std::uint64_t allocs = aether::bench::allocation_count() - allocs_before;
 
