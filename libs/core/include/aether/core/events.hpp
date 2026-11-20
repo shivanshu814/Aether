@@ -29,7 +29,7 @@ namespace aether {
         Expired,
         Canceled,
         Reject,
-        Modified,  // qty reduced in place, priority kept
+        Modified,
     };
 
     enum class RejectReason : std::uint8_t {
@@ -60,4 +60,4 @@ namespace aether {
     static_assert(std::is_trivially_copyable_v<Event>);
     static_assert(sizeof(Command) == 48);
     static_assert(sizeof(Event) == 48);
-} // namespace aether
+}

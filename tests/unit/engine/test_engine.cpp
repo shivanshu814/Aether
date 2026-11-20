@@ -13,7 +13,6 @@
 using namespace aether;
 
 namespace {
-
 Command new_limit(SeqNo seq, InstrumentId instrument, OrderId id, Side side, Price price, Qty qty) {
     Command c{};
     c.seq        = seq;
@@ -46,13 +45,13 @@ TYPED_TEST(EngineTest, InstrumentsNeverMatchEachOther) {
     Engine<TypeParam>             engine(instruments);
     test::VectorSink              sink;
     engine.process(new_limit(1, 0, 1, Side::Sell, 100, 10), sink);
-    engine.process(new_limit(2, 1, 1, Side::Buy, 100, 10), sink); // same price, other instrument
+    engine.process(new_limit(2, 1, 1, Side::Buy, 100, 10), sink);
     for (const Event& e : sink.events) EXPECT_NE(e.type, EventType::Trade);
     EXPECT_EQ(engine.book(0).best_ask(), 100);
     EXPECT_EQ(engine.book(1).best_bid(), 100);
 
     sink.clear();
-    engine.process(new_limit(3, 0, 2, Side::Buy, 100, 10), sink); // now the same instrument
+    engine.process(new_limit(3, 0, 2, Side::Buy, 100, 10), sink);
     ASSERT_EQ(sink.events.size(), 2u);
     EXPECT_EQ(sink.events[1].type, EventType::Trade);
     EXPECT_EQ(sink.events[1].instrument, 0u);
@@ -73,7 +72,7 @@ TYPED_TEST(EngineTest, ProcessBatchMatchesProcessOneByOne) {
     test::VectorSink  expected;
     test::VectorSink  actual;
     for (const Command& c : commands) one_by_one.process(c, expected);
-    // Uneven batches, including ones shorter than the prefetch distance.
+
     std::size_t i = 0;
     for (std::size_t len = 1; i < commands.size(); len = len * 3 % 701 + 1) {
         const std::size_t n = std::min(len, commands.size() - i);
@@ -82,5 +81,4 @@ TYPED_TEST(EngineTest, ProcessBatchMatchesProcessOneByOne) {
     }
     EXPECT_EQ(actual.events, expected.events);
 }
-
-} // namespace
+}

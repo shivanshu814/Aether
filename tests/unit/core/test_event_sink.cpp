@@ -16,7 +16,7 @@ TEST(EventSink, ConceptAcceptsAndRejects) {
 
 TEST(EventSink, VectorSinkCollectsInOrder) {
     test::VectorSink sink;
-    Event a{}; 
+    Event a{};
     a.order_id = 1;
     Event b{};
     b.order_id = 2;

@@ -12,26 +12,16 @@
 #include "aether/journal/event_log.hpp"
 #include "aether/journal/hash.hpp"
 
-// The threaded shape of the exchange:
-//
-//   gateway/sequencer --ring--> engine (owns all books) --ring--> publisher
-//       (caller thread)            (1 thread)                      (1 thread)
-//
-// The engine thread is the only thread that touches the books, so no locks are needed and
-// the output is exactly the same as running the engine on one thread.
-//
-// Everything moves through the rings in batches: each side takes whatever is available
-// (up to kBatch) with one atomic update, instead of paying a cache-line hand-off per item.
 namespace aether {
-
 struct PipelineResult {
-    std::uint64_t hash   = 0; // FNV-1a over all output events, in order
+    std::uint64_t hash   = 0;
     std::uint64_t events = 0;
 };
 
+// gateway/sequencer (caller) --ring--> engine thread (owns all books) --ring--> publisher.
+// Only the engine thread touches the books, so no locks and exactly the single-thread output.
 inline constexpr std::size_t kBatch = 256;
 
-// Collects events on the engine thread and pushes them to the ring a batch at a time.
 class BatchingRingSink {
 public:
     explicit BatchingRingSink(SpscRing<Event>& ring) : ring_(ring) {}
@@ -41,7 +31,7 @@ public:
         if (size_ == buffer_.size()) flush();
     }
 
-    // Blocks (spinning) until everything buffered is in the ring.
+    // Called after every drained batch so events never sit buffered while waiting for input.
     void flush() noexcept {
         std::size_t sent = 0;
         Backoff     backoff;
@@ -64,9 +54,6 @@ private:
 };
 static_assert(EventSink<BatchingRingSink>);
 
-// Runs `commands` through gateway -> engine -> publisher on separate threads and returns the
-// hash of everything the publisher received. If `journal` is given, each command is written
-// to the log before it is handed to the engine.
 template <class Book>
 PipelineResult run_pipeline(std::span<const BookConfig> instruments,
                             std::span<const Command> commands, LogWriter* journal = nullptr,
@@ -87,12 +74,12 @@ PipelineResult run_pipeline(std::span<const BookConfig> instruments,
             const std::size_t n = inbound.try_pop_n(batch.data(), batch.size());
             if (n != 0) {
                 engine.process_batch(std::span<const Command>(batch.data(), n), sink);
-                sink.flush(); // never sit on events while waiting for more input
+                sink.flush();
                 backoff.reset();
             } else if (draining) {
-                break; // the flag was already set before this empty pop: nothing is left
+                break;
             } else if (gateway_done.load(std::memory_order_acquire)) {
-                draining = true; // pop once more; the last push happened before the flag
+                draining = true;
             } else {
                 backoff.pause();
             }
@@ -119,13 +106,11 @@ PipelineResult run_pipeline(std::span<const BookConfig> instruments,
         }
     });
 
-    // Gateway + sequencer: journal first, then hand to the engine, strictly in order.
     std::size_t sent = 0;
     Backoff     backoff;
     while (sent < commands.size()) {
         const std::size_t want = std::min(kBatch, commands.size() - sent);
         if (journal != nullptr) {
-            // Journal a chunk, then push exactly that chunk before journaling any more.
             for (std::size_t i = 0; i < want; ++i) journal->append(commands[sent + i]);
             std::size_t pushed = 0;
             while (pushed < want) {
@@ -155,7 +140,6 @@ PipelineResult run_pipeline(std::span<const BookConfig> instruments,
     return {published.hash(), published.count};
 }
 
-// The same work on the calling thread. This is the reference for run_pipeline.
 template <class Book>
 PipelineResult run_single_threaded(std::span<const BookConfig> instruments,
                                    std::span<const Command> commands) {
@@ -164,5 +148,4 @@ PipelineResult run_single_threaded(std::span<const BookConfig> instruments,
     engine.process_batch(commands, sink);
     return {sink.hash(), sink.count};
 }
-
-} // namespace aether
+}

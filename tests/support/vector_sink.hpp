@@ -6,12 +6,12 @@
 namespace aether::test {
     struct VectorSink {
         std::vector<Event> events;
-        void emit(const Event& e) noexcept { 
-            events.push_back(e); 
+        void emit(const Event& e) noexcept {
+            events.push_back(e);
         }
         void clear() noexcept {
             events.clear();
         }
     };
     static_assert(EventSink<VectorSink>);
-} //namespace aether::test
+}

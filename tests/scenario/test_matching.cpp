@@ -1,5 +1,3 @@
-// Hand-written matching scenarios. Every test runs against BOTH books, so the reference
-// (oracle) and the fast book are held to the same expected behaviour.
 #include <gtest/gtest.h>
 
 #include <vector>
@@ -11,7 +9,6 @@
 using namespace aether;
 
 namespace {
-
 BookConfig small_config() {
     BookConfig cfg{};
     cfg.min_price   = 10'000;
@@ -69,7 +66,6 @@ protected:
         book.on_modify(command(CommandType::Modify, id, Side::Buy, OrderType::Limit, price, qty), sink);
     }
 
-    // The book from the design document's walkthrough (prices in ticks of 0.01).
     void build_walkthrough_book() {
         limit(1, Side::Buy, 10'099, 300);
         limit(2, Side::Sell, 10'101, 50);
@@ -112,16 +108,16 @@ TYPED_TEST(Matching, WalkthroughBuy450SweepsFiveMakers) {
         make(EventType::Trade, 11, 11, Side::Buy, 10'102, 50, 7),
     };
     EXPECT_EQ(this->sink.events, expected);
-    EXPECT_EQ(this->book.best_ask(), 10'102);               // 101.01 is gone
-    EXPECT_EQ(this->book.depth_at(Side::Sell, 10'102), 250); // #7 keeps 250
-    EXPECT_EQ(this->book.best_bid(), 10'099);                // nothing rested
+    EXPECT_EQ(this->book.best_ask(), 10'102);
+    EXPECT_EQ(this->book.depth_at(Side::Sell, 10'102), 250);
+    EXPECT_EQ(this->book.best_bid(), 10'099);
     EXPECT_EQ(this->book.order_count(), 6u);
 }
 
 TYPED_TEST(Matching, WalkthroughBuy800RestsTheLeftover) {
     this->build_walkthrough_book();
     this->limit(11, Side::Buy, 10'102, 800);
-    ASSERT_EQ(this->sink.events.size(), 7u); // Ack, 5 trades, Rested
+    ASSERT_EQ(this->sink.events.size(), 7u);
     EXPECT_EQ(this->sink.events.back(), make(EventType::Rested, 11, 11, Side::Buy, 10'102, 100));
     EXPECT_EQ(this->book.best_bid(), 10'102);
     EXPECT_EQ(this->book.best_ask(), 10'103);
@@ -130,7 +126,7 @@ TYPED_TEST(Matching, WalkthroughBuy800RestsTheLeftover) {
 TYPED_TEST(Matching, TradePrintsAtMakerPrice) {
     this->limit(1, Side::Sell, 10'100, 10);
     this->sink.clear();
-    this->limit(2, Side::Buy, 10'150, 10); // willing to pay more, still trades at 10'100
+    this->limit(2, Side::Buy, 10'150, 10);
     ASSERT_EQ(this->sink.events.size(), 2u);
     EXPECT_EQ(this->sink.events[1], make(EventType::Trade, 2, 2, Side::Buy, 10'100, 10, 1));
     EXPECT_EQ(this->book.order_count(), 0u);
@@ -189,7 +185,7 @@ TYPED_TEST(Matching, IocFillsWhatItCanThenExpires) {
         make(EventType::Expired, 3, 3, Side::Buy, 0, 20),
     };
     EXPECT_EQ(this->sink.events, expected);
-    EXPECT_EQ(this->book.best_bid(), std::nullopt); // IOC never rests
+    EXPECT_EQ(this->book.best_bid(), std::nullopt);
     EXPECT_EQ(this->book.best_ask(), 10'105);
 }
 
@@ -224,16 +220,16 @@ TYPED_TEST(Matching, CancelUnknownOrFilledOrderIsRejected) {
     EXPECT_EQ(this->sink.events.back(),
               make(EventType::Reject, 1, 99, Side::Buy, 0, 0, 0, RejectReason::UnknownOrder));
     this->limit(1, Side::Sell, 10'100, 10);
-    this->limit(2, Side::Buy, 10'100, 10); // fills #1 completely
+    this->limit(2, Side::Buy, 10'100, 10);
     this->cancel(1);
     EXPECT_EQ(this->sink.events.back().reason, RejectReason::UnknownOrder);
 }
 
 TYPED_TEST(Matching, InvalidOrdersAreRejectedWithoutAck) {
     this->limit(1, Side::Buy, 10'100, 0);
-    this->limit(2, Side::Buy, 9'999, 10);   // below the band
-    this->limit(3, Side::Buy, 10'201, 10);  // above the band
-    this->limit(5'000, Side::Buy, 10'100, 10); // id outside id_capacity
+    this->limit(2, Side::Buy, 9'999, 10);
+    this->limit(3, Side::Buy, 10'201, 10);
+    this->limit(5'000, Side::Buy, 10'100, 10);
     ASSERT_EQ(this->sink.events.size(), 4u);
     EXPECT_EQ(this->sink.events[0].reason, RejectReason::InvalidQty);
     EXPECT_EQ(this->sink.events[1].reason, RejectReason::InvalidPrice);
@@ -259,7 +255,7 @@ TYPED_TEST(Matching, BookFullRejectsNewLimitOrders) {
     this->limit(17, Side::Buy, 10'050, 1);
     ASSERT_EQ(this->sink.events.size(), 1u);
     EXPECT_EQ(this->sink.events[0].reason, RejectReason::BookFull);
-    this->cancel(1); // frees a slot
+    this->cancel(1);
     this->sink.clear();
     this->limit(18, Side::Buy, 10'050, 1);
     EXPECT_EQ(this->sink.events.back().type, EventType::Rested);
@@ -277,7 +273,7 @@ TYPED_TEST(Matching, ModifyQtyDownKeepsTimePriority) {
     this->limit(3, Side::Buy, 10'100, 30);
     const std::vector<Event> expected = {
         make(EventType::Ack, 4, 3, Side::Buy, 10'100, 30),
-        make(EventType::Trade, 4, 3, Side::Buy, 10'100, 20, 1), // #1 is still first
+        make(EventType::Trade, 4, 3, Side::Buy, 10'100, 20, 1),
         make(EventType::Trade, 4, 3, Side::Buy, 10'100, 10, 2),
     };
     EXPECT_EQ(this->sink.events, expected);
@@ -297,7 +293,7 @@ TYPED_TEST(Matching, ModifyQtyUpLosesTimePriority) {
     this->sink.clear();
     this->limit(3, Side::Buy, 10'100, 60);
     ASSERT_EQ(this->sink.events.size(), 3u);
-    EXPECT_EQ(this->sink.events[1].maker_id, 2u); // #2 is now ahead of #1
+    EXPECT_EQ(this->sink.events[1].maker_id, 2u);
     EXPECT_EQ(this->sink.events[2].maker_id, 1u);
 }
 
@@ -305,7 +301,7 @@ TYPED_TEST(Matching, ModifyPriceCanCrossAndTrade) {
     this->limit(1, Side::Sell, 10'110, 10);
     this->limit(2, Side::Buy, 10'100, 10);
     this->sink.clear();
-    this->modify(2, 10'110, 10); // re-priced up to the ask
+    this->modify(2, 10'110, 10);
     const std::vector<Event> expected = {
         make(EventType::Canceled, 3, 2, Side::Buy, 10'100, 10),
         make(EventType::Ack, 3, 2, Side::Buy, 10'110, 10),
@@ -335,5 +331,4 @@ TYPED_TEST(Matching, OrderIdCanBeReusedAfterItLeavesTheBook) {
     this->limit(1, Side::Sell, 10'150, 5);
     EXPECT_EQ(this->sink.events.back(), make(EventType::Rested, 3, 1, Side::Sell, 10'150, 5));
 }
-
-} // namespace
+}

@@ -1,10 +1,3 @@
-// aetherd: run the full threaded exchange on generated order flow.
-//
-//   aetherd [--count N] [--instruments N] [--seed N] [--log FILE]
-//
-// gateway/sequencer (this thread) -> SPSC ring -> engine thread -> SPSC ring -> publisher.
-// With --log, every command is journaled before the engine sees it; replay the file with
-// aether_replay and the hash printed here must match.
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>

@@ -14,17 +14,13 @@
 #include "aether/memory/pool.hpp"
 
 namespace aether {
-
-// The fast order book. Same behaviour as RefOrderBook, event for event, but:
+// The fast book. Same events as RefOrderBook, but after construction nothing allocates:
 //   price levels -> flat arrays indexed by (price - min_price), one per side
-//   best price   -> cached index, repaired with a bitmap when a level empties
-//   side         -> per-side state lives in an array indexed by side, so resting and
-//                   cancelling do not branch on buy/sell
-//   FIFO         -> intrusive ring threaded through the orders, closed by a sentinel in
-//                   the level, so linking and unlinking never branch
+//   best price   -> cached index, repaired with the bitmap when a level empties
+//   side         -> per-side state in an array indexed by side, so resting and cancelling
+//                   select the side instead of branching on it
 //   id lookup    -> vector indexed by order id
-//   orders       -> fixed pool allocated once
-// After construction no operation allocates.
+//   orders       -> fixed pool, one 64-byte line each
 class OrderBook {
 public:
     explicit OrderBook(const BookConfig& cfg)
@@ -102,10 +98,9 @@ public:
         execute(fresh, sink);
     }
 
-    // ---- prefetch hints, used by Engine::process_batch ----
-    // Both are branch-free and only issue prefetches; a stale or useless hint is harmless.
-    // The id-index slot is needed by every command: cancels and modifies read it, new
-    // orders write it. Prefetching nullptr (slot empty) is a no-op.
+    // Lookahead hints used by Engine::process_batch. Deliberately branch-free: a first
+    // version that branched on the lookahead command's type was much slower than no
+    // prefetch at all. The id is clamped, and prefetching nullptr is a no-op.
     void prefetch_index_slot(OrderId id) const noexcept {
         __builtin_prefetch(&index_[id < cfg_.id_capacity ? id : 0], 1);
     }
@@ -113,7 +108,6 @@ public:
         __builtin_prefetch(index_[id < cfg_.id_capacity ? id : 0], 1);
     }
 
-    // ---- read-only views, used by tests ----
     std::optional<Price> best_bid() const {
         const std::size_t best = sides_[kBid].best;
         return best == kNone ? std::nullopt : std::optional<Price>(price_of(best));
@@ -133,12 +127,11 @@ private:
     static constexpr std::size_t kBid  = static_cast<std::size_t>(Side::Buy);
     static constexpr std::size_t kAsk  = static_cast<std::size_t>(Side::Sell);
 
-    // Everything one side of the book owns. sides_[kBid] holds the bids, sides_[kAsk] the asks.
     struct BookSide {
         explicit BookSide(std::size_t level_count) : levels(level_count), bits(level_count) {}
         std::vector<PriceLevel> levels;
         LevelBitmap             bits;
-        std::size_t             best = kNone; // index of the best non-empty level
+        std::size_t             best = kNone;
     };
 
     bool        price_ok(Price p) const noexcept { return p >= cfg_.min_price && p <= cfg_.max_price; }
@@ -149,9 +142,8 @@ private:
         return id < cfg_.id_capacity ? index_[id] : nullptr;
     }
 
-    // True if the incoming order can trade against the best level of the opposite side.
-    // Written without branching on side: for a passive order this is almost always false,
-    // so the single branch on the result predicts well.
+    // Can the incoming order trade against the best level opposite? Written with selects,
+    // not branches on side; for a passive order it is almost always false, which predicts well.
     bool crosses_best(const Command& c) const noexcept {
         const bool        buy  = c.side == Side::Buy;
         const std::size_t best = sides_[buy ? kAsk : kBid].best;
@@ -181,7 +173,6 @@ private:
         }
     }
 
-    // Fill against one level, front to back. Fully filled makers go back to the pool.
     template <EventSink S>
     void sweep_level(PriceLevel& level, Price price, const Command& taker, Qty& remaining, S& sink) {
         Link* link = level.sentinel.next;
@@ -192,7 +183,7 @@ private:
             remaining -= fill;
             maker->qty -= fill;
             level.total -= fill;
-            if (maker->qty != 0) break; // taker is exhausted
+            if (maker->qty != 0) break;
             link = maker->next;
             level.unlink(maker);
             index_[maker->id] = nullptr;
@@ -200,7 +191,6 @@ private:
         }
     }
 
-    // A buyer takes from the asks, lowest price first.
     template <EventSink S>
     void match_buy(const Command& c, Qty& remaining, S& sink) {
         const bool market = c.order_type == OrderType::Market;
@@ -217,7 +207,6 @@ private:
         }
     }
 
-    // A seller takes from the bids, highest price first.
     template <EventSink S>
     void match_sell(const Command& c, Qty& remaining, S& sink) {
         const bool market = c.order_type == OrderType::Market;
@@ -235,7 +224,7 @@ private:
     }
 
     void rest(const Command& c, Qty remaining) noexcept {
-        Order* o      = pool_.create(); // cannot fail: on_new checked pool_.full()
+        Order* o      = pool_.create();
         o->id         = c.order_id;
         o->price      = c.price;
         o->qty        = remaining;
@@ -248,7 +237,7 @@ private:
         BookSide&         side = sides_[static_cast<std::size_t>(c.side)];
         side.levels[i].push_back(o);
         side.bits.set(i);
-        // Best bid is the highest index, best ask the lowest. Selected, not branched.
+
         const bool better = side.best == kNone || (buy ? i > side.best : i < side.best);
         side.best         = better ? i : side.best;
         index_[c.order_id] = o;
@@ -261,7 +250,7 @@ private:
         level->unlink(o);
         const bool emptied = level->empty();
         side.bits.clear_if(i, emptied);
-        if (emptied && i == side.best) [[unlikely]] { // the best level just emptied: find the next one
+        if (emptied && i == side.best) [[unlikely]] {
             if (o->side == Side::Buy) {
                 side.best = i == 0 ? kNone : side.bits.prev_at_or_below(i - 1);
             } else {
@@ -278,5 +267,4 @@ private:
     std::vector<Order*>     index_;
     Pool<Order>             pool_;
 };
-
-} // namespace aether
+}

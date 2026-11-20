@@ -23,4 +23,4 @@ namespace aether {
     constexpr Side opposite(Side s)noexcept {
         return s == Side::Buy ? Side::Sell : Side::Buy;
     };
-} // namespace aether
+}

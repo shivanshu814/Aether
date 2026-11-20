@@ -7,7 +7,6 @@
 using aether::Pool;
 
 namespace {
-
 struct Tracked {
     static inline int alive = 0;
     int               value;
@@ -24,9 +23,9 @@ TEST(Pool, CreatesUpToCapacityThenReturnsNull) {
         EXPECT_EQ(*p, i);
         seen.insert(p);
     }
-    EXPECT_EQ(seen.size(), 3u); // three distinct slots
+    EXPECT_EQ(seen.size(), 3u);
     EXPECT_TRUE(pool.full());
-    EXPECT_EQ(pool.create(9), nullptr); // exhausted: no fallback to new
+    EXPECT_EQ(pool.create(9), nullptr);
     EXPECT_EQ(pool.in_use(), 3u);
 }
 
@@ -37,7 +36,7 @@ TEST(Pool, DestroyedSlotIsReusedFirst) {
     pool.destroy(a);
     EXPECT_EQ(pool.in_use(), 1u);
     int* c = pool.create(3);
-    EXPECT_EQ(c, a); // LIFO free list: the slot that is still warm in cache
+    EXPECT_EQ(c, a);
     EXPECT_EQ(*b, 2);
     EXPECT_EQ(*c, 3);
 }
@@ -61,5 +60,4 @@ TEST(Pool, SurvivesManyCreateDestroyCycles) {
     }
     EXPECT_EQ(pool.in_use(), 0u);
 }
-
-} // namespace
+}

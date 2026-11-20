@@ -1,18 +1,3 @@
-// aether_bench: measure the three headline numbers for the reference and the fast engine.
-//
-//   aether_bench [--count N] [--instruments N] [--seed N] [--runs N] [--shards N] [--pin 1]
-//
-// --shards N adds a scaling section: 1..N engine threads, each with its own instruments and
-// its own stream of --count commands, all started together. Reports aggregate commands/sec.
-// --pin 1 binds shard s to CPU s (Linux only; ignored elsewhere).
-//
-// For each engine:
-//   1. warm-up pass over the whole stream (result discarded)
-//   2. throughput: N timed passes with no per-command clock; median orders/sec. Commands go
-//      through Engine::process_batch, which prefetches a few commands ahead.
-//      Heap allocations are counted inside the timed loop only.
-//   3. latency: one pass with steady_clock around every command, into a fixed histogram.
-// Commands are generated up front from a seeded RNG, so the generator is never timed.
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
@@ -32,10 +17,8 @@
 #include "aether/sim/load_gen.hpp"
 
 namespace {
-
 using Clock = std::chrono::steady_clock;
 
-// Cheapest possible sink: the engine still has to build every event, but nothing is stored.
 struct CountingSink {
     std::uint64_t events   = 0;
     std::uint64_t checksum = 0;
@@ -49,19 +32,22 @@ struct Result {
     const char*   name            = "";
     double        orders_per_sec  = 0;
     double        allocs_per_cmd  = 0;
-    std::uint64_t allocs          = 0; // heap allocations inside one timed pass
+    std::uint64_t allocs          = 0;
     std::uint64_t events          = 0;
     std::uint64_t checksum        = 0;
     std::uint64_t p50 = 0, p99 = 0, p999 = 0, max = 0;
 };
 
+// One untimed warm-up pass, then timed passes on a fresh engine (median reported), then a
+// separate latency pass with the clock around every command. Allocations are counted inside
+// the timed loop only; what the engine allocates at construction is excluded on purpose.
 template <class Book>
 Result measure(const char* name, const std::vector<aether::BookConfig>& instruments,
                const std::vector<aether::Command>& commands, int runs) {
     Result result{};
     result.name = name;
 
-    { // warm-up: fault in pages, warm caches and the branch predictor
+    {
         aether::Engine<Book> engine(instruments);
         CountingSink         sink;
         engine.process_batch(commands, sink);
@@ -69,7 +55,7 @@ Result measure(const char* name, const std::vector<aether::BookConfig>& instrume
 
     std::vector<double> rates;
     for (int run = 0; run < runs; ++run) {
-        aether::Engine<Book> engine(instruments); // all up-front allocation happens here
+        aether::Engine<Book> engine(instruments);
         CountingSink         sink;
         const std::uint64_t  allocs_before = aether::bench::allocation_count();
         const auto           start         = Clock::now();
@@ -86,7 +72,7 @@ Result measure(const char* name, const std::vector<aether::BookConfig>& instrume
     std::sort(rates.begin(), rates.end());
     result.orders_per_sec = rates[rates.size() / 2];
 
-    { // latency pass
+    {
         auto                 histogram = std::make_unique<aether::bench::Histogram>();
         aether::Engine<Book> engine(instruments);
         CountingSink         sink;
@@ -105,7 +91,6 @@ Result measure(const char* name, const std::vector<aether::BookConfig>& instrume
     return result;
 }
 
-// What two back-to-back clock reads cost; every latency sample includes about this much.
 std::uint64_t clock_overhead_ns() {
     aether::bench::Histogram h;
     for (int i = 0; i < 1'000'000; ++i) {
@@ -117,7 +102,6 @@ std::uint64_t clock_overhead_ns() {
     return h.percentile(50.0);
 }
 
-// Smallest step the clock can actually report. Latency samples are multiples of this.
 std::uint64_t clock_tick_ns() {
     std::uint64_t smallest = ~std::uint64_t{0};
     for (int i = 0; i < 1'000'000; ++i) {
@@ -130,8 +114,6 @@ std::uint64_t clock_tick_ns() {
     return smallest;
 }
 
-// Aggregate throughput of 1..max_shards independent engine threads (fast book).
-// Every shard gets its own instruments and its own seeded stream of load.count commands.
 void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs, bool pin) {
     const aether::BookConfig                      book = aether::sim::book_config_for(base);
     std::vector<std::vector<aether::Command>>     all_streams;
@@ -144,9 +126,7 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs, bool
     std::printf("\nscaling: one engine thread per shard, %zu commands and %u instrument(s) per shard%s\n",
                 base.count, base.instruments,
                 pin ? (aether::pin_current_thread(0) ? ", threads pinned to CPUs" : ", pinning requested but not supported on this OS") : "");
-    // "until last shard" divides all commands by the time the slowest thread needed: the
-    // conservative figure. "sum of shard rates" adds up what each thread sustained on its own.
-    // They differ when the OS runs some threads slower than others.
+
     std::printf("| shards | until last shard | sum of shard rates | slowest shard | fastest shard | allocations |\n");
     std::printf("|--------|------------------|--------------------|---------------|---------------|-------------|\n");
     for (int n = 1; n <= max_shards; ++n) {
@@ -155,15 +135,13 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs, bool
             static_cast<std::size_t>(n), std::vector<aether::BookConfig>(base.instruments, book));
         const double total = static_cast<double>(base.count) * n;
 
-        aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams, pin); // warm-up
+        aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams, pin);
         struct Pass {
             double until_last = 0, sum_rates = 0, slowest = 0, fastest = 0;
         };
         std::vector<Pass> passes;
         std::uint64_t     allocs = 0;
         for (int run = 0; run < runs; ++run) {
-            // Engine construction and thread start-up allocate; that happens before the
-            // clock starts but inside this window, so it is subtracted using an empty run.
             const std::uint64_t before = aether::bench::allocation_count();
             const auto result = aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams, pin);
             const std::uint64_t with_work = aether::bench::allocation_count() - before;
@@ -199,8 +177,7 @@ void print(const Result& r) {
                 " | %12.3f |\n",
                 r.name, r.orders_per_sec / 1e6, r.p50, r.p99, r.p999, r.max, r.allocs_per_cmd);
 }
-
-} // namespace
+}
 
 int main(int argc, char** argv) {
     aether::sim::LoadConfig load{};

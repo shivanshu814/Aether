@@ -12,13 +12,8 @@
 #include "aether/core/event_sink.hpp"
 
 namespace aether {
-
-// Reference order book: slow, simple and meant to be obviously correct.
-// It is the oracle the fast OrderBook is checked against, so it must never be optimised.
-// Everything is done with standard containers:
-//   price levels  -> std::map (sorted), one per side
-//   FIFO at price -> std::deque
-//   id lookup     -> std::unordered_map
+// Reference book: slow, simple, obviously correct. It is the oracle the fast OrderBook is
+// checked against in the differential tests, so it must never be optimised.
 class RefOrderBook {
 public:
     explicit RefOrderBook(const BookConfig& cfg) : cfg_(cfg) {}
@@ -60,8 +55,6 @@ public:
         sink.emit(ev::canceled(c, info.side, info.price, left));
     }
 
-    // Same price and qty not above what is left: change in place, priority kept.
-    // Anything else (price change or qty up): cancel, then re-enter as a new limit order.
     template <EventSink S>
     void on_modify(const Command& c, S& sink) {
         if (c.qty <= 0) {
@@ -94,7 +87,6 @@ public:
         execute(fresh, sink);
     }
 
-    // ---- read-only views, used by tests ----
     std::optional<Price> best_bid() const {
         return bids_.empty() ? std::nullopt : std::optional<Price>(bids_.begin()->first);
     }
@@ -124,8 +116,8 @@ private:
         Price price;
     };
     using Queue = std::deque<RefOrder>;
-    using Bids  = std::map<Price, Queue, std::greater<Price>>; // best (highest) first
-    using Asks  = std::map<Price, Queue, std::less<Price>>;    // best (lowest) first
+    using Bids  = std::map<Price, Queue, std::greater<Price>>;
+    using Asks  = std::map<Price, Queue, std::less<Price>>;
 
     bool price_ok(Price p) const { return p >= cfg_.min_price && p <= cfg_.max_price; }
 
@@ -134,7 +126,6 @@ private:
         return taker.side == Side::Buy ? level_price <= taker.price : level_price >= taker.price;
     }
 
-    // Ack, match against the opposite side, then rest or expire what is left.
     template <EventSink S>
     void execute(const Command& c, S& sink) {
         sink.emit(ev::ack(c));
@@ -166,7 +157,7 @@ private:
             if (!crosses(taker, price)) break;
             Queue& queue = best->second;
             while (remaining > 0 && !queue.empty()) {
-                RefOrder& maker = queue.front(); // time priority: oldest first
+                RefOrder& maker = queue.front();
                 const Qty fill  = std::min(remaining, maker.qty);
                 sink.emit(ev::trade(taker, maker.id, price, fill));
                 remaining -= fill;
@@ -204,7 +195,6 @@ private:
         return left;
     }
 
-    // Removes the order from its level and the index. Returns the qty it still had.
     Qty remove(OrderId id, Info info) {
         const Qty left = info.side == Side::Buy ? remove_from(bids_, id, info.price)
                                                 : remove_from(asks_, id, info.price);
@@ -217,5 +207,4 @@ private:
     Asks                              asks_;
     std::unordered_map<OrderId, Info> index_;
 };
-
-} // namespace aether
+}

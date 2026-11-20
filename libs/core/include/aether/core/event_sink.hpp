@@ -6,4 +6,4 @@ namespace aether {
     concept EventSink = requires(S& sink, const Event& e){
         { sink.emit(e) } noexcept;
     };
-} //namespace aether
+}

@@ -12,15 +12,10 @@
 #include "aether/core/config.hpp"
 #include "aether/core/events.hpp"
 
-// The event log stores the engine's INPUTS only: the instrument configuration, then every
-// sequenced command. Outputs are never stored; they are recomputed on replay.
-//
-// File layout (native byte order):
-//   LogHeader
-//   InstrumentRecord x header.instrument_count
-//   LogRecord        x (until end of file)
 namespace aether {
-
+// The log stores the engine's INPUTS only: instrument configuration, then every sequenced
+// command. Outputs are recomputed on replay, so any nondeterminism in the engine is a bug.
+// Layout: LogHeader, InstrumentRecord x count, LogRecord until end of file.
 struct LogHeader {
     char          magic[8]         = {'A', 'E', 'T', 'H', 'L', 'O', 'G', '1'};
     std::uint32_t version          = 1;
@@ -38,8 +33,8 @@ static_assert(sizeof(InstrumentRecord) == 32);
 
 struct LogRecord {
     std::uint64_t seq        = 0;
-    std::uint64_t ts_ns      = 0; // from the sequencer
-    std::uint8_t  type       = 0; // CommandType
+    std::uint64_t ts_ns      = 0;
+    std::uint8_t  type       = 0;
     std::uint8_t  side       = 0;
     std::uint8_t  order_type = 0;
     std::uint8_t  pad        = 0;
@@ -84,7 +79,7 @@ public:
     LogWriter(const std::string& path, std::span<const BookConfig> instruments)
         : file_(std::fopen(path.c_str(), "wb")) {
         if (file_ == nullptr) throw std::runtime_error("cannot open log for writing: " + path);
-        std::setvbuf(file_, nullptr, _IOFBF, std::size_t{1} << 20); // 1 MiB: fewer write() calls
+        std::setvbuf(file_, nullptr, _IOFBF, std::size_t{1} << 20);
         LogHeader header{};
         header.instrument_count = static_cast<std::uint32_t>(instruments.size());
         write(&header, sizeof(header));
@@ -145,7 +140,6 @@ public:
 
     const std::vector<BookConfig>& instruments() const noexcept { return instruments_; }
 
-    // Reads the next command. Returns false at end of file.
     bool next(Command& out) {
         LogRecord rec{};
         if (!read(&rec, sizeof(rec))) return false;
@@ -159,5 +153,4 @@ private:
     std::FILE*              file_;
     std::vector<BookConfig> instruments_;
 };
-
-} // namespace aether
+}

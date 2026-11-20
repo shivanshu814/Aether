@@ -15,18 +15,10 @@
 #include "aether/concurrency/spsc_ring.hpp"
 #include "aether/engine/engine.hpp"
 
-// Sharding: N engine threads, each owning its own set of instruments.
-//
-//   instrument i  ->  shard (i % N),  where it becomes local instrument (i / N)
-//
-// Books for different instruments never share state, so shards need no locks and no
-// communication. Every instrument still sees its own commands in their original order, so
-// each shard's output is deterministic and identical to running that shard on one thread.
-// What is NOT defined is an ordering between events of different shards.
 namespace aether {
-
-// Splits one command stream into per-shard streams, keeping the original order inside each
-// shard and rewriting instrument ids to the shard-local id.
+// Sharding: N engine threads, instrument i -> shard i % N. Books never share state, so
+// shards need no locks and each shard's output is deterministic; there is no defined order
+// between events of different shards.
 inline std::vector<std::vector<Command>> partition_by_shard(std::span<const Command> commands,
                                                             std::size_t shard_count) {
     std::vector<std::vector<Command>> shards(shard_count);
@@ -39,7 +31,6 @@ inline std::vector<std::vector<Command>> partition_by_shard(std::span<const Comm
     return shards;
 }
 
-// The instruments each shard owns, in shard-local order.
 inline std::vector<std::vector<BookConfig>> partition_instruments(std::span<const BookConfig> instruments,
                                                                   std::size_t shard_count) {
     std::vector<std::vector<BookConfig>> shards(shard_count);
@@ -47,8 +38,6 @@ inline std::vector<std::vector<BookConfig>> partition_instruments(std::span<cons
     return shards;
 }
 
-// Pins the calling thread to one CPU. Only Linux can do this; elsewhere it does nothing and
-// returns false (macOS has no call to bind a thread to a core).
 inline bool pin_current_thread(std::size_t cpu) noexcept {
 #if defined(__linux__)
     cpu_set_t set;
@@ -63,20 +52,17 @@ inline bool pin_current_thread(std::size_t cpu) noexcept {
 
 template <class Sink>
 struct ShardedRun {
-    std::vector<Sink>   sinks;         // one per shard, in shard order
-    std::vector<double> shard_seconds; // how long each shard took for its own stream
-    double              seconds = 0;   // wall time from the common start until the last shard finished
+    std::vector<Sink>   sinks;
+    std::vector<double> shard_seconds;
+    double              seconds = 0;
 };
 
-// Runs one engine per shard, each on its own thread. Engines are built before the clock
-// starts; all threads are released together. With pin_threads, shard s is bound to CPU s
-// (Linux only), so the scheduler cannot move it or stack two shards on one core.
 template <class Book, class Sink>
 ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_instruments,
                              const std::vector<std::vector<Command>>&    shard_commands,
                              bool                                        pin_threads = false) {
     using Clock = std::chrono::steady_clock;
-    struct alignas(64) Slot { // one cache line per shard: no false sharing between sinks
+    struct alignas(64) Slot {
         Sink              sink{};
         Clock::time_point finished{};
     };
@@ -96,9 +82,9 @@ ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_i
             Sink&                       sink     = slots[s].sink;
             ready.fetch_add(1, std::memory_order_release);
             while (!go.load(std::memory_order_acquire)) cpu_relax();
-            // Plain process(), not process_batch(): with 8 threads sharing the cache and
-            // memory system, the lookahead prefetches cost more than they save (measured:
-            // about 240 M against 270 M aggregate at 8 threads).
+
+            // process(), not process_batch(): with 8 threads the lookahead prefetches cost
+            // more than they save (about 240 M against 270 M aggregate).
             for (const Command& c : commands) engine.process(c, sink);
             slots[s].finished = Clock::now();
         });
@@ -118,5 +104,4 @@ ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_i
     result.seconds = std::chrono::duration<double>(last - start).count();
     return result;
 }
-
-} // namespace aether
+}

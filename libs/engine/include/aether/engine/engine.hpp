@@ -9,8 +9,6 @@
 #include "aether/core/event_sink.hpp"
 
 namespace aether {
-
-// What the engine needs from a book type. RefOrderBook and OrderBook both satisfy it.
 template <class B, class S>
 concept BookFor = EventSink<S> && requires(B book, const Command& c, S& sink) {
     book.on_new(c, sink);
@@ -18,8 +16,10 @@ concept BookFor = EventSink<S> && requires(B book, const Command& c, S& sink) {
     book.on_modify(c, sink);
 };
 
-// Routes each command to the book of its instrument. One book per instrument id.
-// The engine is a pure function of the command stream: no clock, no I/O, no randomness.
+// Routes each command to the book of its instrument. A pure function of the command stream:
+// no clock, no I/O, no randomness, so a journaled run replays to the same output.
+// Book is a template parameter (no virtual calls): the same engine runs the reference
+// oracle in the differential tests and the fast book in production.
 template <class Book>
 class Engine {
 public:
@@ -43,12 +43,11 @@ public:
         }
     }
 
-    // Same result as calling process() on each command in order, but looks ahead: the
-    // id-index slot of the command kFar ahead and the order of the command kNear ahead are
-    // prefetched, so a cancel's two dependent cache misses are already in flight when the
-    // command is reached. Hints are branch-free; the instrument is clamped, never branched on.
     template <EventSink S>
         requires BookFor<Book, S>
+    // Same result as process() on each command in order, but prefetches the id-index slot
+    // kFar ahead and the order kNear ahead, so a cancel's two dependent cache misses are
+    // already in flight. Distances 8 to 32 measured the same; 12/4 kept.
     void process_batch(std::span<const Command> commands, S& sink) {
         if constexpr (requires(const Book& b, OrderId id) { b.prefetch_index_slot(id); b.prefetch_order(id); }) {
 #ifndef AETHER_PREFETCH_FAR
@@ -79,5 +78,4 @@ public:
 private:
     std::vector<Book> books_;
 };
-
-} // namespace aether
+}

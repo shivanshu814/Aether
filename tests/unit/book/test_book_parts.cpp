@@ -25,7 +25,7 @@ TEST(PriceLevel, PushBackKeepsFifoOrderAndTotals) {
     EXPECT_EQ(level.back(), &c);
     EXPECT_EQ(a.next, &b);
     EXPECT_EQ(c.prev, &b);
-    EXPECT_TRUE(level.is_end(c.next)); // the ring closes back onto the level
+    EXPECT_TRUE(level.is_end(c.next));
     EXPECT_TRUE(level.is_end(a.prev));
     EXPECT_EQ(level.total, 60);
     EXPECT_EQ(level.count, 3u);
@@ -42,21 +42,21 @@ TEST(PriceLevel, UnlinkFromMiddleFrontAndBack) {
     level.push_back(&b);
     level.push_back(&c);
 
-    level.unlink(&b); // middle
+    level.unlink(&b);
     EXPECT_EQ(a.next, &c);
     EXPECT_EQ(c.prev, &a);
     EXPECT_EQ(level.total, 40);
 
-    level.unlink(&a); // front
+    level.unlink(&a);
     EXPECT_EQ(level.front(), &c);
     EXPECT_TRUE(level.is_end(c.prev));
 
-    level.unlink(&c); // last one
+    level.unlink(&c);
     EXPECT_TRUE(level.empty());
     EXPECT_EQ(level.total, 0);
     EXPECT_EQ(level.count, 0u);
 
-    level.push_back(&b); // a level can be reused after it empties
+    level.push_back(&b);
     EXPECT_EQ(level.front(), &b);
     EXPECT_EQ(level.back(), &b);
 }

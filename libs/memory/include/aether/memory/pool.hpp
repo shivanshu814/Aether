@@ -5,19 +5,11 @@
 #include <utility>
 
 namespace aether {
-
-// Fixed-capacity object pool. All memory is allocated in the constructor; after that
-// create() and destroy() never touch the heap.
-//
-// Free slots are kept on a stack of pointers (an array plus a count), not on a linked list
-// threaded through the slots. A linked free list makes every create() load a pointer out of
-// the slot it just handed out before it can find the next one, so allocations queue up
-// behind each other's cache misses. With the array, the next free slot is one sequential
-// read away. Measured on a burst of inserts into slots freed in random order: 11.5 ns per
-// insert before, 7.1 ns after. Cost: 8 bytes per slot.
-//
-// LIFO order is kept, so the slot freed last (still warm in cache) is reused first.
-// Not thread-safe: only the engine thread uses it.
+// Fixed-capacity object pool: all memory is allocated here, never on the hot path.
+// Free slots live on a separate stack of pointers rather than a list threaded through the
+// slots: with the list, each create() had to load the next pointer out of the slot it was
+// handing out, so a burst of allocations queued behind cache misses (11.5 ns -> 7.1 ns).
+// Not thread-safe; only the engine thread uses it.
 template <class T>
 class Pool {
 public:
@@ -26,7 +18,6 @@ public:
           free_(std::make_unique<T*[]>(capacity)),
           capacity_(capacity),
           free_count_(capacity) {
-        // Stack the slots so that the first create() returns slot 0, then slot 1, ...
         for (std::size_t i = 0; i < capacity; ++i) {
             free_[i] = reinterpret_cast<T*>(slots_[capacity - 1 - i].storage);
         }
@@ -37,7 +28,6 @@ public:
     Pool(Pool&&) noexcept            = default;
     Pool& operator=(Pool&&) noexcept = default;
 
-    // Returns nullptr when the pool is exhausted. It never falls back to new.
     template <class... Args>
     T* create(Args&&... args) {
         if (free_count_ == 0) return nullptr;
@@ -59,9 +49,8 @@ private:
     };
 
     std::unique_ptr<Slot[]> slots_;
-    std::unique_ptr<T*[]>   free_;       // stack of free slots; top is free_[free_count_ - 1]
+    std::unique_ptr<T*[]>   free_;
     std::size_t             capacity_   = 0;
     std::size_t             free_count_ = 0;
 };
-
-} // namespace aether
+}

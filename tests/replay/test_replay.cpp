@@ -1,4 +1,3 @@
-// Determinism tests: journal round trip, replay hash, golden hash and threaded == single.
 #include <gtest/gtest.h>
 
 #include <cstdio>
@@ -16,8 +15,6 @@
 using namespace aether;
 
 namespace {
-
-// Pinned output of make_stream(20261120, 200'000, 4). See the GoldenHash test.
 constexpr std::uint64_t GOLDEN_EVENTS = 357'564;
 constexpr std::uint64_t GOLDEN_HASH   = 8394587788805723800ULL;
 
@@ -115,7 +112,6 @@ TEST(Replay, ReferenceAndFastEngineHashTheSame) {
     EXPECT_EQ(fast.events, reference.events);
 }
 
-// Three threads and two rings must not change a single output event.
 TEST(Replay, ThreadedPipelineMatchesSingleThreaded) {
     const Stream stream   = make_stream(7, 100'000, 3);
     const auto   single   = run_single_threaded<OrderBook>(stream.instruments, stream.commands);
@@ -123,7 +119,6 @@ TEST(Replay, ThreadedPipelineMatchesSingleThreaded) {
     EXPECT_EQ(threaded.hash, single.hash);
     EXPECT_EQ(threaded.events, single.events);
 
-    // A tiny ring forces constant full/empty hand-offs between the threads.
     const auto squeezed = run_pipeline<OrderBook>(stream.instruments, stream.commands, nullptr, 8);
     EXPECT_EQ(squeezed.hash, single.hash);
 }
@@ -151,12 +146,12 @@ TEST(Sharding, PartitionKeepsPerInstrumentOrderAndRemapsIds) {
     const auto   shards = partition_by_shard(stream.commands, 2);
     ASSERT_EQ(shards.size(), 2u);
     EXPECT_EQ(shards[0].size() + shards[1].size(), stream.commands.size());
-    // Instruments 0,2,4 -> shard 0 as local 0,1,2. Instruments 1,3 -> shard 1 as local 0,1.
+
     for (std::size_t s = 0; s < 2; ++s) {
         SeqNo last = 0;
         for (const Command& c : shards[s]) {
             EXPECT_LT(c.instrument, s == 0 ? 3u : 2u);
-            EXPECT_GT(c.seq, last); // original order is kept inside a shard
+            EXPECT_GT(c.seq, last);
             last = c.seq;
         }
     }
@@ -165,8 +160,6 @@ TEST(Sharding, PartitionKeepsPerInstrumentOrderAndRemapsIds) {
     EXPECT_EQ(configs[1].size(), 2u);
 }
 
-// Each shard, running on its own thread next to the others, must produce exactly what that
-// shard's stream produces on a single thread, with either book.
 TEST(Sharding, EachShardMatchesItsSingleThreadedRun) {
     const Stream stream  = make_stream(14, 120'000, 6);
     const auto   streams = partition_by_shard(stream.commands, 3);
@@ -183,18 +176,14 @@ TEST(Sharding, EachShardMatchesItsSingleThreadedRun) {
         EXPECT_EQ(fast.hash, reference.hash) << "shard " << s;
         total_events += sharded.sinks[s].count;
     }
-    // Sharding changes nothing about what happens: same number of events as one engine.
+
     EXPECT_EQ(total_events, run_single_threaded<OrderBook>(stream.instruments, stream.commands).events);
 }
 
-// Golden hash: the output of a fixed, seeded stream is pinned. If any change to the engine,
-// the books or the generator alters behaviour, this fails. Update the constants only when
-// the behaviour change is intended.
 TEST(Replay, GoldenHash) {
     const Stream stream = make_stream(20261120, 200'000, 4);
     const auto   result = run_single_threaded<OrderBook>(stream.instruments, stream.commands);
     EXPECT_EQ(result.events, GOLDEN_EVENTS);
     EXPECT_EQ(result.hash, GOLDEN_HASH);
 }
-
-} // namespace
+}

@@ -4,9 +4,7 @@
 
 #include "aether/core/events.hpp"
 
-// Lets GoogleTest print an Event as readable text instead of 48 raw bytes.
 namespace aether {
-
 inline const char* to_string(EventType t) {
     switch (t) {
     case EventType::Ack:      return "Ack";
@@ -26,5 +24,4 @@ inline void PrintTo(const Event& e, std::ostream* os) {
         << " side=" << (e.side == Side::Buy ? "Buy" : "Sell")
         << " reason=" << static_cast<int>(e.reason) << "}";
 }
-
-} // namespace aether
+}

@@ -1,4 +1,3 @@
-// Counting replacements for global operator new/delete. Linked only into the benchmark.
 #include "alloc_counter.hpp"
 
 #include <atomic>
@@ -11,8 +10,10 @@ std::atomic<std::uint64_t> g_allocations{0};
 
 namespace aether::bench {
 std::uint64_t allocation_count() noexcept { return g_allocations.load(std::memory_order_relaxed); }
-} // namespace aether::bench
+}
 
+// Counting replacements for global new/delete. Linked only into the benchmark, never into
+// the engine or the tests.
 void* operator new(std::size_t size) {
     g_allocations.fetch_add(1, std::memory_order_relaxed);
     if (void* p = std::malloc(size == 0 ? 1 : size)) return p;

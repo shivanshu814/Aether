@@ -16,9 +16,9 @@ TEST(SpscRing, CapacityRoundsUpToPowerOfTwo) {
 TEST(SpscRing, FifoOrderAndFullEmptyOnOneThread) {
     SpscRing<int> ring(4);
     int           out = 0;
-    EXPECT_FALSE(ring.try_pop(out)); // empty
+    EXPECT_FALSE(ring.try_pop(out));
     for (int i = 0; i < 4; ++i) EXPECT_TRUE(ring.try_push(i));
-    EXPECT_FALSE(ring.try_push(99)); // full
+    EXPECT_FALSE(ring.try_push(99));
     for (int i = 0; i < 4; ++i) {
         ASSERT_TRUE(ring.try_pop(out));
         EXPECT_EQ(out, i);
@@ -36,8 +36,6 @@ TEST(SpscRing, WrapsAroundManyTimes) {
     }
 }
 
-// One producer thread, one consumer thread. Every value must arrive exactly once, in order.
-// Run under the tsan preset this also checks the memory ordering for data races.
 TEST(SpscRing, TwoThreadsDeliverEverythingInOrder) {
     constexpr std::uint64_t kCount = 500'000;
     SpscRing<std::uint64_t> ring(1024);
@@ -68,12 +66,12 @@ TEST(SpscRing, BatchPushAndPopMoveWhatFits) {
     SpscRing<int> ring(8);
     const int     in[6] = {1, 2, 3, 4, 5, 6};
     EXPECT_EQ(ring.try_push_n(in, 6), 6u);
-    EXPECT_EQ(ring.try_push_n(in, 6), 2u); // only two slots were left
+    EXPECT_EQ(ring.try_push_n(in, 6), 2u);
     int out[16] = {};
     EXPECT_EQ(ring.try_pop_n(out, 3), 3u);
     EXPECT_EQ(out[0], 1);
     EXPECT_EQ(out[2], 3);
-    EXPECT_EQ(ring.try_pop_n(out, 16), 5u); // 4,5,6 then 1,2
+    EXPECT_EQ(ring.try_pop_n(out, 16), 5u);
     EXPECT_EQ(out[0], 4);
     EXPECT_EQ(out[3], 1);
     EXPECT_EQ(out[4], 2);
@@ -81,7 +79,6 @@ TEST(SpscRing, BatchPushAndPopMoveWhatFits) {
     EXPECT_EQ(ring.try_push_n(in, 0), 0u);
 }
 
-// Batches of uneven size on both sides, across two threads.
 TEST(SpscRing, TwoThreadsBatchedDeliverEverythingInOrder) {
     constexpr std::uint64_t kCount = 500'000;
     SpscRing<std::uint64_t> ring(256);

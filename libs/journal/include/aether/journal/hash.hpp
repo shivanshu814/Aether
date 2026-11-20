@@ -5,11 +5,8 @@
 #include "aether/core/event_sink.hpp"
 
 namespace aether {
-
-// FNV-1a over 64-bit words: xor the value in, multiply by the FNV prime. Classic FNV-1a feeds
-// one byte per step; feeding a whole field per step is 8x fewer multiplies, and every value
-// here is an integer field, so the result does not depend on byte order or struct padding.
-// It is used to check that two runs produced the same events, not as a general-purpose hash.
+// FNV-1a over 64-bit fields, never over raw struct bytes, so padding and byte order cannot
+// change the hash. Used to compare runs, not as a general-purpose hash.
 class Fnv1a {
 public:
     constexpr void mix(std::uint64_t value) noexcept {
@@ -22,8 +19,6 @@ private:
     std::uint64_t hash_ = 14695981039346656037ULL;
 };
 
-// An EventSink that folds every event into one running hash, field by field.
-// Two runs produced the same output if and only if hash and count match.
 struct HashSink {
     Fnv1a         hasher;
     std::uint64_t count = 0;
@@ -45,5 +40,4 @@ struct HashSink {
 };
 
 static_assert(EventSink<HashSink>);
-
-} // namespace aether
+}

@@ -5,10 +5,8 @@
 #include <cstdint>
 
 namespace aether::bench {
-
-// Fixed-size log-scale latency histogram (HdrHistogram style). Values below 64 get one
-// bucket each; above that every power of two is split into 32 sub-buckets, so the relative
-// error is about 3%. record() never allocates, so it can sit inside the timed loop.
+// Fixed-size log-scale latency histogram: record() never allocates, so it can sit inside
+// the timed loop. About 3% relative error per bucket.
 class Histogram {
 public:
     void record(std::uint64_t value) noexcept {
@@ -20,7 +18,6 @@ public:
     std::uint64_t count() const noexcept { return count_; }
     std::uint64_t max() const noexcept { return max_; }
 
-    // Smallest bucket value v such that at least `percentile` percent of samples are <= v.
     std::uint64_t percentile(double percentile) const noexcept {
         if (count_ == 0) return 0;
         const double  wanted = percentile / 100.0 * static_cast<double>(count_);
@@ -40,7 +37,7 @@ private:
 
     static std::size_t index_of(std::uint64_t v) noexcept {
         if (v < kLinear) return static_cast<std::size_t>(v);
-        const std::size_t exponent = 63 - static_cast<std::size_t>(std::countl_zero(v)); // >= 6
+        const std::size_t exponent = 63 - static_cast<std::size_t>(std::countl_zero(v));
         const std::size_t sub      = static_cast<std::size_t>(v >> (exponent - kSubBits)) & (kSub - 1);
         return kLinear + (exponent - 6) * kSub + sub;
     }
@@ -57,5 +54,4 @@ private:
     std::uint64_t                                          count_ = 0;
     std::uint64_t                                          max_   = 0;
 };
-
-} // namespace aether::bench
+}

@@ -1,9 +1,3 @@
-// aether_replay: replay an event log into a fresh engine and print the hash of its output.
-//
-//   aether_replay <log file> [--reference] [--threaded]
-//
-// The log holds inputs only, so the hash is recomputed from scratch. Two runs of the same
-// log must print the same hash, whichever book or threading mode is used.
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>

@@ -2,10 +2,7 @@
 
 #include "aether/core/events.hpp"
 
-// Small helpers that build output events from the command that caused them.
-// Both the reference book and the fast book use these, so their events have the same shape.
 namespace aether::ev {
-
 constexpr Event base(const Command& c, EventType type) noexcept {
     Event e{};
     e.seq        = c.seq;
@@ -29,7 +26,6 @@ constexpr Event reject(const Command& c, RejectReason reason) noexcept {
     return e;
 }
 
-// price is the maker's price; qty is the fill size; side is the taker's side.
 constexpr Event trade(const Command& taker, OrderId maker_id, Price price, Qty qty) noexcept {
     Event e    = base(taker, EventType::Trade);
     e.maker_id = maker_id;
@@ -66,5 +62,4 @@ constexpr Event modified(const Command& c, Side side, Price price, Qty new_qty) 
     e.qty   = new_qty;
     return e;
 }
-
-} // namespace aether::ev
+}

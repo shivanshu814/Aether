@@ -1,7 +1,3 @@
-// Differential test: the same seeded command stream goes through the reference engine and
-// the fast engine. After every single command their events must be identical, and at the end
-// the visible book state must match. A failure prints the seed and command index, which
-// reproduces the bug exactly.
 #include <gtest/gtest.h>
 
 #include <vector>
@@ -15,9 +11,7 @@
 using namespace aether;
 
 namespace {
-
 void run_differential(const sim::LoadConfig& load, const BookConfig& book, bool expect_rejects) {
-    // Generate against the wide default band; `book` may be tighter to provoke rejects.
     const std::vector<Command>    commands = sim::generate(load, sim::book_config_for(load));
     const std::vector<BookConfig> instruments(load.instruments, book);
 
@@ -49,7 +43,7 @@ void run_differential(const sim::LoadConfig& load, const BookConfig& book, bool 
             ASSERT_EQ(fast.book(id).depth_at(Side::Sell, p), reference.book(id).depth_at(Side::Sell, p));
         }
     }
-    // Guard against a stream that never exercises matching at all.
+
     EXPECT_GT(trades, expect_rejects ? std::uint64_t{100} : commands.size() / 50)
         << "stream produced too few trades to be a useful test";
     if (expect_rejects) {
@@ -57,9 +51,6 @@ void run_differential(const sim::LoadConfig& load, const BookConfig& book, bool 
     }
 }
 
-// The generator must produce work that reaches the book: with matching limits, every cancel
-// and modify names an order that is resting at that moment, so nothing is rejected, and the
-// book settles near its target size.
 TEST(LoadGenerator, CancelsAndModifiesAlwaysHitRestingOrders) {
     sim::LoadConfig load{};
     load.seed        = 99;
@@ -84,14 +75,14 @@ TEST(LoadGenerator, CancelsAndModifiesAlwaysHitRestingOrders) {
         }
     }
     EXPECT_EQ(rejects, 0u);
-    EXPECT_EQ(canceled, cancels);          // every cancel removed a real order
+    EXPECT_EQ(canceled, cancels);
     EXPECT_GT(cancels, commands.size() / 5);
     EXPECT_GT(trades, commands.size() / 10);
     for (InstrumentId id = 0; id < load.instruments; ++id) {
         EXPECT_GT(engine.book(id).order_count(), 800u);
         EXPECT_LT(engine.book(id).order_count(), 1'200u);
     }
-    EXPECT_EQ(sim::generate(load, book), commands); // same config, same stream
+    EXPECT_EQ(sim::generate(load, book), commands);
 }
 
 class Differential : public ::testing::TestWithParam<std::uint64_t> {};
@@ -105,8 +96,6 @@ TEST_P(Differential, FastEngineMatchesReference) {
     run_differential(load, sim::book_config_for(load), false);
 }
 
-// A tiny book: narrow price band and very few order slots, so InvalidPrice and BookFull
-// rejects, pool exhaustion and constant level creation/removal are all exercised.
 TEST_P(Differential, TightLimitsProvokeRejects) {
     sim::LoadConfig load{};
     load.seed        = GetParam() + 1'000;
@@ -122,5 +111,4 @@ TEST_P(Differential, TightLimitsProvokeRejects) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Seeds, Differential, ::testing::Values(1, 2, 3, 4, 5, 6));
-
-} // namespace
+}
