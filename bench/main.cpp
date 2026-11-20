@@ -1,6 +1,9 @@
 // aether_bench: measure the three headline numbers for the reference and the fast engine.
 //
-//   aether_bench [--count N] [--instruments N] [--seed N] [--runs N]
+//   aether_bench [--count N] [--instruments N] [--seed N] [--runs N] [--shards N]
+//
+// --shards N adds a scaling section: 1..N engine threads, each with its own instruments and
+// its own stream of --count commands, all started together. Reports aggregate commands/sec.
 //
 // For each engine:
 //   1. warm-up pass over the whole stream (result discarded)
@@ -23,6 +26,7 @@
 #include "aether/book/order_book.hpp"
 #include "aether/engine/engine.hpp"
 #include "aether/reference/ref_order_book.hpp"
+#include "aether/runtime/sharded.hpp"
 #include "aether/sim/load_gen.hpp"
 
 namespace {
@@ -124,6 +128,52 @@ std::uint64_t clock_tick_ns() {
     return smallest;
 }
 
+// Aggregate throughput of 1..max_shards independent engine threads (fast book).
+// Every shard gets its own instruments and its own seeded stream of load.count commands.
+void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
+    const aether::BookConfig                      book = aether::sim::book_config_for(base);
+    std::vector<std::vector<aether::Command>>     all_streams;
+    for (int s = 0; s < max_shards; ++s) {
+        aether::sim::LoadConfig load = base;
+        load.seed                    = base.seed + static_cast<std::uint64_t>(s);
+        all_streams.push_back(aether::sim::generate(load, book));
+    }
+
+    std::printf("\nscaling: one engine thread per shard, %zu commands and %u instrument(s) per shard\n",
+                base.count, base.instruments);
+    std::printf("| shards | aggregate commands/sec | per shard    | allocations |\n");
+    std::printf("|--------|------------------------|--------------|-------------|\n");
+    for (int n = 1; n <= max_shards; ++n) {
+        const std::vector<std::vector<aether::Command>> streams(all_streams.begin(), all_streams.begin() + n);
+        const std::vector<std::vector<aether::BookConfig>> instruments(
+            static_cast<std::size_t>(n), std::vector<aether::BookConfig>(base.instruments, book));
+        const double total = static_cast<double>(base.count) * n;
+
+        aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams); // warm-up
+        std::vector<double> rates;
+        std::uint64_t       allocs = 0;
+        for (int run = 0; run < runs; ++run) {
+            // Engine construction and thread start-up allocate; that happens before the
+            // clock starts but inside this window, so it is subtracted using an empty run.
+            const std::uint64_t before = aether::bench::allocation_count();
+            const auto result = aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams);
+            const std::uint64_t with_work = aether::bench::allocation_count() - before;
+
+            const std::vector<std::vector<aether::Command>> empty(static_cast<std::size_t>(n));
+            const std::uint64_t before_empty = aether::bench::allocation_count();
+            aether::run_sharded<aether::OrderBook, CountingSink>(instruments, empty);
+            const std::uint64_t setup_only = aether::bench::allocation_count() - before_empty;
+
+            allocs = with_work > setup_only ? with_work - setup_only : 0;
+            rates.push_back(total / result.seconds);
+        }
+        std::sort(rates.begin(), rates.end());
+        const double median = rates[rates.size() / 2];
+        std::printf("| %6d | %20.1f M | %10.1f M | %11" PRIu64 " |\n", n, median / 1e6, median / 1e6 / n,
+                    allocs);
+    }
+}
+
 void print(const Result& r) {
     std::printf("| %-22s | %10.2f M | %6" PRIu64 " | %6" PRIu64 " | %7" PRIu64 " | %9" PRIu64
                 " | %12.3f |\n",
@@ -136,12 +186,14 @@ int main(int argc, char** argv) {
     aether::sim::LoadConfig load{};
     load.count = 5'000'000;
     int runs   = 5;
+    int shards = 0;
     for (int i = 1; i + 1 < argc; i += 2) {
         if (std::strcmp(argv[i], "--count") == 0) load.count = std::strtoull(argv[i + 1], nullptr, 10);
         if (std::strcmp(argv[i], "--instruments") == 0)
             load.instruments = static_cast<std::uint32_t>(std::strtoul(argv[i + 1], nullptr, 10));
         if (std::strcmp(argv[i], "--seed") == 0) load.seed = std::strtoull(argv[i + 1], nullptr, 10);
         if (std::strcmp(argv[i], "--runs") == 0) runs = std::atoi(argv[i + 1]);
+        if (std::strcmp(argv[i], "--shards") == 0) shards = std::atoi(argv[i + 1]);
     }
     if (load.count == 0 || load.instruments == 0 || runs <= 0) {
         std::fprintf(stderr, "--count, --instruments and --runs must be positive\n");
@@ -175,5 +227,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("speed-up: %.1fx throughput\n", fast.orders_per_sec / reference.orders_per_sec);
+
+    if (shards > 0) scaling(load, shards, runs);
     return 0;
 }

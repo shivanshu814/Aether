@@ -9,6 +9,7 @@ cmake --preset release && cmake --build --preset release
 ./build/release/bench/aether_bench --count 5000000 --runs 5 --instruments 4
 ./build/release/apps/aetherd --count 5000000 --instruments 4
 ./build/release/apps/aetherd --count 5000000 --instruments 4 --log run.log
+./build/release/bench/aether_bench --count 5000000 --runs 5 --shards 8
 ```
 
 ## Setup
@@ -68,6 +69,35 @@ hashes every output event.
 | Three threads | 25.4 M commands/sec |
 | Three threads, every command journaled to disk before the engine sees it | 15.4 M commands/sec |
 
+## Results: scaling across cores (sharding)
+
+`aether_bench --shards 8`: one engine thread per shard, each with its own instrument and its
+own seeded stream of 5,000,000 commands, all released together. No locks and no shared
+state between shards. Throughput is total commands divided by the wall time until the
+**last** shard finishes. Two separate benchmark runs, each the median of 5 passes:
+
+| Engine threads | Aggregate commands/sec (run 1) | (run 2) | Per thread | Heap allocations |
+|---|---|---|---|---|
+| 1 | 60.0 M | 60.8 M | 60 M | 0 |
+| 2 | 96.0 M | 95.1 M | 48 M | 0 |
+| 4 | 168.1 M | 163.5 M | 41 M | 0 |
+| 6 | **211.1 M** | **229.9 M** | 37 M | 0 |
+| 8 | **274.6 M** | **263.3 M** | 34 M | 0 |
+
+The machine has 8 performance cores and 2 efficiency cores; beyond 8 threads the results
+become erratic, so they are not reported. Scaling is not linear: per-thread throughput
+falls from 60 M to about 34 M at 8 threads, because the threads share memory bandwidth and
+last-level cache, and macOS cannot pin them to cores.
+
+What sharding does and does not give:
+
+- Each instrument still sees its commands in their original order, so every shard's output
+  is deterministic. A test checks each shard's hash against a single-threaded run of the
+  same shard, with both books.
+- There is no defined order between events of different shards.
+- It needs at least as many busy instruments as threads. One very active instrument is
+  still limited to one thread, about 60 M commands/sec here.
+
 ## Determinism check
 
 A 2,000,000-command, 4-instrument run was journaled by `aetherd` (96 MB log) and replayed
@@ -89,6 +119,7 @@ Every change was measured before and after on the same machine and stream.
 | Reference book replaced by pool + intrusive FIFO + flat price arrays + bitmap | 17.2 M/s, 0.551 allocs | 57.6 M/s, 0 allocs | yes |
 | Pipeline: batched ring transfers (one atomic update per batch of up to 256), spin-then-yield waiting, and one hash multiply per field instead of per byte | 6.7 M/s | 25.4 M/s | yes |
 | Book: per-side state in an array indexed by side and a branch-free crossing test, so resting and cancelling do not branch on buy/sell | 57.6 M/s | 60.5 M/s | yes |
+| Sharding: one engine thread per group of instruments, no shared state | 60 M/s on 1 thread | 263 to 275 M/s on 8 threads | yes |
 | Profile-guided optimisation (clang `-fprofile-instr-use`) | 57.5 M/s | 59.2 M/s | no: about 3%, not worth a two-stage build |
 | Software prefetch of the id index and the order a few commands ahead | 57.9 M/s | 34.3 M/s | no: slower. The working set already fits in cache; the cost is branches, not memory |
 

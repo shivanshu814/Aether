@@ -24,6 +24,9 @@ start-up. Both engines produce identical output, event for event.
 The full pipeline (gateway, engine and publisher threads joined by lock-free rings) runs at
 25.4 M commands/sec, or 15.4 M with every command journaled to disk first.
 
+Sharded by instrument across engine threads, with no locks and no shared state, aggregate
+throughput passes 200 M commands/sec at 6 threads and reaches 263 to 275 M at 8 threads.
+
 Method, the four-instrument numbers, the optimisation log and the limits of these
 measurements (clock resolution, synthetic order flow, untuned macOS) are in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
@@ -46,7 +49,7 @@ measurements (clock resolution, synthetic order flow, untuned macOS) are in
 
 ## How it is tested
 
-83 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
+85 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
 Release, and Debug with ThreadSanitizer.
 
 - **Scenario tests** run every hand-written case against both books, including the design
@@ -99,7 +102,7 @@ aether/
 │   ├── engine/           Engine<Book>: instrument id -> book, command dispatch
 │   ├── journal/          event log reader/writer, FNV-1a hash sink
 │   ├── sim/              deterministic load generator
-│   └── runtime/          threaded gateway -> engine -> publisher pipeline
+│   └── runtime/          threaded gateway -> engine -> publisher pipeline, engine sharding
 ├── apps/
 │   ├── aetherd/          the threaded exchange on generated flow
 │   └── replay/           replay a log, print the output hash
@@ -126,4 +129,5 @@ Key rules:
 
 - Linux and x86 benchmarks, with thread pinning and isolated cores.
 - A network gateway and a binary wire protocol. Order flow is generated in-process.
-- Sharding books across several engine threads.
+- Sharding inside the live pipeline. Sharded engines are implemented and benchmarked, but
+  `aetherd` still runs a single engine thread.

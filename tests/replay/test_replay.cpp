@@ -10,6 +10,7 @@
 #include "aether/journal/hash.hpp"
 #include "aether/reference/ref_order_book.hpp"
 #include "aether/runtime/pipeline.hpp"
+#include "aether/runtime/sharded.hpp"
 #include "aether/sim/load_gen.hpp"
 
 using namespace aether;
@@ -143,6 +144,47 @@ TEST(Replay, ThreadedPipelineJournalsEveryCommand) {
 
     EXPECT_EQ(commands, stream.commands);
     EXPECT_EQ(run_single_threaded<OrderBook>(reader.instruments(), commands).hash, live.hash);
+}
+
+TEST(Sharding, PartitionKeepsPerInstrumentOrderAndRemapsIds) {
+    const Stream stream = make_stream(13, 20'000, 5);
+    const auto   shards = partition_by_shard(stream.commands, 2);
+    ASSERT_EQ(shards.size(), 2u);
+    EXPECT_EQ(shards[0].size() + shards[1].size(), stream.commands.size());
+    // Instruments 0,2,4 -> shard 0 as local 0,1,2. Instruments 1,3 -> shard 1 as local 0,1.
+    for (std::size_t s = 0; s < 2; ++s) {
+        SeqNo last = 0;
+        for (const Command& c : shards[s]) {
+            EXPECT_LT(c.instrument, s == 0 ? 3u : 2u);
+            EXPECT_GT(c.seq, last); // original order is kept inside a shard
+            last = c.seq;
+        }
+    }
+    const auto configs = partition_instruments(stream.instruments, 2);
+    EXPECT_EQ(configs[0].size(), 3u);
+    EXPECT_EQ(configs[1].size(), 2u);
+}
+
+// Each shard, running on its own thread next to the others, must produce exactly what that
+// shard's stream produces on a single thread, with either book.
+TEST(Sharding, EachShardMatchesItsSingleThreadedRun) {
+    const Stream stream  = make_stream(14, 120'000, 6);
+    const auto   streams = partition_by_shard(stream.commands, 3);
+    const auto   configs = partition_instruments(stream.instruments, 3);
+
+    const auto sharded = run_sharded<OrderBook, HashSink>(configs, streams);
+    ASSERT_EQ(sharded.sinks.size(), 3u);
+    std::uint64_t total_events = 0;
+    for (std::size_t s = 0; s < 3; ++s) {
+        const auto fast      = run_single_threaded<OrderBook>(configs[s], streams[s]);
+        const auto reference = run_single_threaded<RefOrderBook>(configs[s], streams[s]);
+        EXPECT_EQ(sharded.sinks[s].hash(), fast.hash) << "shard " << s;
+        EXPECT_EQ(sharded.sinks[s].count, fast.events) << "shard " << s;
+        EXPECT_EQ(fast.hash, reference.hash) << "shard " << s;
+        total_events += sharded.sinks[s].count;
+    }
+    // Sharding changes nothing about what happens: same number of events as one engine.
+    EXPECT_EQ(total_events, run_single_threaded<OrderBook>(stream.instruments, stream.commands).events);
 }
 
 // Golden hash: the output of a fixed, seeded stream is pinned. If any change to the engine,
