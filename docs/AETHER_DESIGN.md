@@ -11,8 +11,8 @@ Headline numbers:
 | **p50 / p99 / p99.9** | Latency per command: typical case, 1-in-100 worst, 1-in-1000 worst |
 | **Allocations per order** | Heap allocations on the hot path. Target in steady state: exactly **0** |
 
-Measured on an Apple M1 Pro: **60.5 M commands/sec** on one engine thread with p99 85 ns,
-p99.9 167 ns and **0** heap allocations per command; 263 to 280 M commands/sec across 8
+Measured on an Apple M1 Pro: **61.9 M commands/sec** on one engine thread with p99 83 ns,
+p99.9 167 ns and **0** heap allocations per command; about 270 M commands/sec across 8
 sharded engine threads. Method, full tables and the limits of these numbers are in
 [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -347,6 +347,9 @@ Both sides live in one array indexed by side (`sides_[Buy]`, `sides_[Sell]`), ea
 its levels, its bitmap and its cached best index. Resting and cancelling then pick the side
 by index instead of branching on buy/sell, which measured about 5% faster.
 
+Each price level closes its queue into a ring with a sentinel link of its own, so an order
+always has a valid prev and next and linking or unlinking never tests for "first" or "last".
+
 ### Types
 
 ```cpp
@@ -358,26 +361,25 @@ enum class Side      : std::uint8_t { Buy, Sell };
 enum class OrderType : std::uint8_t { Limit, Market, IOC };
 
 struct PriceLevel;
-struct Order {                    // exactly one 64-byte cache line (static_assert)
+struct Link { Link* prev; Link* next; };   // intrusive FIFO links
+
+struct Order : Link {             // exactly one 64-byte cache line (static_assert)
     OrderId       id;
     Price         price;
     Qty           qty;            // remaining
     std::uint64_t seq;            // arrival sequence = time priority
-    Order*        prev  = nullptr;// intrusive FIFO links
-    Order*        next  = nullptr;
     PriceLevel*   level = nullptr;// back-pointer for O(1) cancel
     std::uint32_t instrument;
     Side          side;           // Market and IOC orders never rest, so no type is stored
 };
 
 struct PriceLevel {
-    Order*        head  = nullptr;  // oldest, fills first
-    Order*        tail  = nullptr;  // newest, push here
+    Link          sentinel;         // sentinel.next = oldest (fills first), sentinel.prev = newest
     Qty           total = 0;
     std::uint32_t count = 0;
-    void push_back(Order*);
-    void unlink(Order*);
-    bool empty() const;
+    void push_back(Order*);         // no branches
+    void unlink(Order*);            // no branches
+    bool empty() const;             // sentinel.next == &sentinel
 };
 ```
 
@@ -403,8 +405,7 @@ classDiagram
         +size_t best
     }
     class PriceLevel {
-        +Order* head
-        +Order* tail
+        +Link sentinel
         +Qty total
         +push_back(Order*)
         +unlink(Order*)
@@ -418,7 +419,8 @@ classDiagram
         +PriceLevel* level
     }
     class Pool~T~ {
-        -Slot* free_head_
+        -T** free_
+        -size_t free_count_
         +create() T*
         +destroy(T*)
     }
@@ -480,19 +482,29 @@ allocate():                         deallocate(p):
 
 Both O(1). No lock needed (only the engine thread touches it).
 
+**What was built instead.** The diagrams above show the classic free list threaded through
+the slots. It was implemented first and then replaced: with that list, every allocation has
+to load the "next free" pointer out of the slot it is handing out before the following
+allocation can start, so a burst of allocations queues up behind those loads. `Pool<T>` now
+keeps the free slots on a separate stack of pointers (an array and a count). Same O(1)
+operations and the same last-freed-first-reused order, but the next free slot is a
+sequential array read. A burst of inserts went from 11.5 ns to 7.1 ns each; the cost is
+8 bytes per slot.
+
 ```cpp
 template <class T>
 class Pool {
 public:
-    explicit Pool(std::size_t capacity);   // the ONLY allocation; build the free list here
+    explicit Pool(std::size_t capacity);   // the only allocations; fill the free stack here
     template <class... Args>
-    T*   create(Args&&... args);           // pop free list, construct; nullptr when exhausted
-    void destroy(T* p) noexcept;           // std::destroy_at(p), push slot on free list
+    T*   create(Args&&... args);           // pop the stack, construct; nullptr when exhausted
+    void destroy(T* p) noexcept;           // std::destroy_at(p), push the slot back
     std::size_t in_use() const noexcept;
 private:
-    union Slot { Slot* next; alignas(T) std::byte storage[sizeof(T)]; };
+    struct Slot { alignas(T) std::byte storage[sizeof(T)]; };
     std::unique_ptr<Slot[]> slots_;
-    Slot* free_head_ = nullptr;
+    std::unique_ptr<T*[]>   free_;        // stack of free slots
+    std::size_t             free_count_;
 };
 ```
 
@@ -558,7 +570,7 @@ What the implementation does beyond the basic ring:
 - **Batched hand-off.** `try_push_n` / `try_pop_n` move up to 256 items with one atomic
   update, so the two cores exchange a cache line per batch instead of per item. The engine
   thread flushes its output batch before it waits for more input, so events never sit
-  buffered. This took the pipeline from 6.7 M to 25.4 M commands/sec.
+  buffered. This took the pipeline from 6.7 M to about 25 M commands/sec.
 - **Spin, then yield.** A waiting thread spins briefly with a CPU pause hint and then yields
   the core (`Backoff`), which keeps progress even when there are fewer cores than threads.
 - macOS cannot hard-pin threads to cores; Linux can (`pthread_setaffinity_np`).
@@ -580,9 +592,9 @@ flowchart LR
 ```
 
 `run_sharded` implements this and `aether_bench --shards N` measures it: aggregate
-throughput passes 200 M commands/sec at 6 engine threads and reaches 263 to 280 M at 8.
-Scaling is not linear: the fastest shard stays at single-thread speed while the slowest
-drops to about 35 M. Measurements rule out cache size and memory bandwidth and point to
+throughput passes 200 M commands/sec at 6 engine threads and reaches about 270 M at 8.
+Scaling is not linear: at 8 threads a shard runs at 34 to 51 M instead of 60 M.
+Measurements rule out memory bandwidth, show cache is only part of it, and point to
 scheduling, since macOS cannot pin threads to cores (see BENCHMARKS.md). The live `aetherd` pipeline still runs a single
 engine thread.
 

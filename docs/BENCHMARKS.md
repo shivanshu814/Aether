@@ -16,18 +16,33 @@ cmake --preset release && cmake --build --preset release
 
 | | |
 |---|---|
-| Machine | Apple M1 Pro, 10 cores, 32 GB |
+| Machine | Apple M1 Pro (8 performance + 2 efficiency cores), 32 GB |
 | OS | macOS 27.0 |
 | Compiler | Apple clang 21.0.0 |
 | Flags | `-O3 -DNDEBUG -mcpu=native`, C++20 |
 | Date | 2026-11-20 |
 
+## The workload
+
+The command stream is generated up front from a seeded RNG (seed 42), so the generator is
+never inside a timed loop. The generator runs a reference engine alongside itself, so it
+always knows which orders are resting: every cancel and modify names an order that is in
+the book at that moment.
+
+What the 5,000,000-command, one-instrument stream actually contains (measured, not the
+generator's nominal percentages):
+
+| | |
+|---|---|
+| New orders | 62.0% of commands. 20.1% of them trade on arrival; 4.0% are market orders, 4.0% IOC |
+| Cancels | 33.0%, every one removes a resting order |
+| Modifies | 5.0% |
+| Rejected commands | 0 |
+| Resting orders | the book holds about 20,000 once it has filled |
+| Output events | 9,125,791 (3.22 M acks, 1.39 M trades, 2.59 M rested, 1.77 M canceled, 0.13 M modified, 0.03 M expired) |
+
 ## Method
 
-- The command stream is generated up front from a seeded RNG (seed 42), so the generator is
-  never inside a timed loop. Mix: about 55% passive limit orders, 30% cancels, 10% aggressive
-  orders (crossing limit, IOC, market) and 5% modifies. 5,000,000 commands produce about
-  9.1 million output events.
 - Each engine gets one untimed warm-up pass, then timed passes on a fresh engine.
   **Commands/sec** is the median pass.
 - **Latency** is a separate pass with `steady_clock` read before and after every command,
@@ -39,24 +54,30 @@ cmake --preset release && cmake --build --preset release
 
 ## Results: engine only (single thread)
 
-1 instrument, 5,000,000 commands. These figures were the same across repeated runs.
+1 instrument, 5,000,000 commands. Three separate benchmark runs; the fast engine's figures
+were the same in all three.
 
 | Engine | Commands/sec | p50 | p99 | p99.9 | Heap allocations per command |
 |---|---|---|---|---|---|
-| Reference (`std::map` + `std::deque` + `std::unordered_map`) | 17.2 M | 42 ns | 335 ns | 591 ns | 0.551 (2,754,329 total) |
-| Fast (pool + intrusive FIFO + flat price array + bitmap) | **60.5 M** | 41 ns | **85 ns** | **167 ns** | **0** (0 total) |
+| Reference (`std::map` + `std::deque` + `std::unordered_map`) | 4.2 M | 125 ns | 1,007 to 1,087 ns | 3,007 to 4,031 ns | 0.576 (2,880,277 total) |
+| Fast (pool + intrusive FIFO + flat price array + bitmap) | **61.9 M** | 41 ns | **83 ns** | **167 ns** | **0** (0 total) |
 
 4 instruments, 5,000,000 commands, median of 5 benchmark runs:
 
 | Engine | Commands/sec | p99 | p99.9 (median) | p99.9 (range over 5 runs) | Heap allocations per command |
 |---|---|---|---|---|---|
-| Reference | 13.3 M | 463 ns | 879 ns | 799 to 2,623 ns | 0.556 |
-| Fast | **51.9 M** | **125 ns** | **251 ns** | 251 to 423 ns | **0** |
+| Reference | 3.8 M | 1,215 ns | 4,479 ns | 4,095 to 4,863 ns | 0.581 |
+| Fast | **45.2 M** | **167 ns** | **295 ns** | 251 to 423 ns | **0** |
 
-Fast vs reference: 3.5x the throughput and 3.5x lower p99.9 on one instrument; 3.9x the
-throughput, 3.7x lower p99 and 3.5x lower median p99.9 on four instruments. The
-four-instrument p99.9 moves between runs on this untuned machine, so the range is shown;
-a single run can make the gap look much larger or smaller than the median.
+Fast vs reference: 14.7x the throughput, 13x lower p99 and about 20x lower p99.9 on one
+instrument; 12x the throughput, 7x lower p99 and 15x lower median p99.9 on four.
+
+**Read this comparison for what it is.** The reference book is the test oracle: it is
+written to be obviously correct, not fast. Its cancel does a linear scan of the queue at
+that price, and with 20,000 resting orders spread over about 20 price levels a queue holds
+around 1,000 orders. That scan is most of the gap. The comparison shows what the data
+structures buy over the simplest correct implementation; it is not a comparison against
+another optimised engine.
 
 ## Results: full threaded pipeline
 
@@ -66,84 +87,64 @@ hashes every output event.
 
 | Mode | End-to-end throughput |
 |---|---|
-| Three threads | 25.4 M commands/sec |
-| Three threads, every command journaled to disk before the engine sees it | 15.4 M commands/sec |
+| Three threads | 22.6 M commands/sec |
+| Three threads, every command journaled to disk before the engine sees it | 15.7 M commands/sec |
 
 ## Results: scaling across cores (sharding)
 
 `aether_bench --shards 8`: one engine thread per shard, each with its own instrument and its
 own seeded stream of 5,000,000 commands, all released together. No locks and no shared
-state between shards. Median of 5 passes.
+state between shards. Each figure is the median of 5 passes; two separate runs are shown.
 
-Two ways of adding the threads up are shown, because they differ:
+Two ways of adding the threads up, because they differ:
 
 - **Until last shard:** all commands divided by the wall time until the slowest thread
   finishes. This is the conservative figure and the one quoted elsewhere.
 - **Sum of shard rates:** what each thread sustained on its own stream, added together.
 
-| Engine threads | Until last shard | Sum of shard rates | Slowest shard | Fastest shard | Heap allocations |
+| Engine threads | Until last shard (run 1 / run 2) | Sum of shard rates | Slowest shard | Fastest shard | Heap allocations |
 |---|---|---|---|---|---|
-| 1 | 59.5 M | 59.5 M | 59.5 M | 59.5 M | 0 |
-| 2 | 103.8 M | 111.1 M | 51.9 M | 59.2 M | 0 |
-| 4 | 161.3 M | 181.0 M | 40.3 M | 53.7 M | 0 |
-| 6 | **227.7 M** | 279.2 M | 38.0 M | 54.9 M | 0 |
-| 8 | **280.0 M** | 379.1 M | 35.0 M | 55.8 M | 0 |
-
-Across three separate benchmark runs the 8-thread "until last shard" figure was 263 M,
-275 M and 280 M commands/sec, and the 6-thread figure 211 M, 230 M and 228 M.
+| 1 | 62.3 M / 58.6 M | 62.3 M | 62.3 M | 62.3 M | 0 |
+| 2 | 96.7 M / 95.6 M | 104.1 M | 48.3 M | 55.8 M | 0 |
+| 4 | 152.2 M / 151.9 M | 174.3 M | 38.1 M | 50.8 M | 0 |
+| 6 | **214.2 M / 206.8 M** | 252.1 M | 35.7 M | 49.0 M | 0 |
+| 8 | **271.3 M / 269.3 M** | 340.8 M | 33.9 M | 51.1 M | 0 |
 
 ### Why it does not scale linearly
 
-Even with 8 threads the fastest shard still runs at 54 to 56 M commands/sec, the same as a
-lone engine, while the slowest drops to about 35 M. So the engines do not slow each other
-down evenly; some threads are simply given less CPU. Three measurements narrow this down:
+At 8 threads a shard runs at 34 to 51 M commands/sec instead of 60 M. Measurements:
 
-| Test | Result | What it rules out |
+| Test | Result | What it says |
 |---|---|---|
-| Shrinking the resting-order working set 100x (20,000 to 200 live orders) | no change in per-thread speed, at 1, 4 or 8 threads | cache capacity |
-| 8 threads only reading their command arrays, no engine | 2,267 M commands/sec, about 109 GB/s | memory bandwidth: the engines read about 13 GB/s |
-| Per-thread rates within one pass | 33 to 56 M at 8 threads; at 4 threads one pass had all four at 54 to 58 M and the next had 38 to 57 M | a fixed hardware limit |
+| Book size: 20,000 against 200 resting orders | 1 thread: 54 M against 71 M. 8 threads, per thread: 33 M against 38 M | Cache matters: a deep book costs about 25%. But a tiny book still loses almost half its speed at 8 threads, so cache is not the main cause |
+| 8 threads only reading their command arrays, no engine | 2,281 M commands/sec, about 109 GB/s | Not memory bandwidth: the engines read about 13 GB/s |
+| Per-thread rates within one pass | fastest 51 M, slowest 34 M | The threads are not slowed evenly; some get less CPU |
+| Raising the thread priority class | no change | |
 
-What is left is scheduling. The machine has 8 performance and 2 efficiency cores, macOS
-decides which thread runs where and cannot be told to pin them, and raising the thread
-priority class made no difference. With every thread on a performance core at single-thread
-speed the ceiling on this machine would be about 8 x 58 M = 460 M commands/sec. Reaching it
-needs an OS that can pin threads to isolated physical cores. Bare-metal Linux has not been
-measured; a Linux VM on this laptop is below.
+The uneven per-thread speed points at scheduling: macOS decides which thread runs on which
+core (performance or efficiency) and cannot be told to pin them. With every thread on a
+performance core at single-thread speed the ceiling on this machine would be about
+8 x 60 M = 480 M commands/sec.
 
 ### Linux with thread pinning (in a VM on the same laptop)
 
-To test the scheduling explanation, the same benchmark was built and run inside a Linux
-virtual machine on the same M1 Pro: OrbStack, kernel 6.17, Debian 12, g++ 12.2,
-`-O3 -mcpu=native`, 10 virtual CPUs. `--pin 1` binds shard `s` to CPU `s` with
-`pthread_setaffinity_np`.
+To test that, the benchmark was built and run inside a Linux virtual machine on the same
+M1 Pro: OrbStack, kernel 6.17, Debian 12, g++ 12.2, `-O3 -mcpu=native`, 10 virtual CPUs.
+`--pin 1` binds shard `s` to CPU `s` with `pthread_setaffinity_np`. One run each.
 
-```bash
-./aether_bench --count 5000000 --runs 5 --shards 8           # not pinned
-./aether_bench --count 5000000 --runs 5 --shards 8 --pin 1   # pinned
-```
+| Engine threads | macOS | Linux VM, not pinned | Linux VM, pinned |
+|---|---|---|---|
+| 1 | 62.3 M | 54.4 M | 56.8 M |
+| 2 | 96.7 M | 88.6 M | 71.9 M |
+| 4 | 152.2 M | 142.8 M | 145.0 M |
+| 6 | 214.2 M | 214.7 M | 217.1 M |
+| 8 | 271.3 M | 251.5 M | 267.8 M |
 
-| Engine threads | macOS, until last shard | Linux VM, not pinned | Linux VM, pinned | Linux VM pinned, sum of shard rates |
-|---|---|---|---|---|
-| 1 | 59.5 M | 61.7 M | 61.4 M | 61.4 M |
-| 2 | 103.8 M | 122.5 M | 121.0 M | 121.6 M |
-| 4 | 161.3 M | 196.8 M | 188.6 M | 213.0 M |
-| 6 | 227.7 M | 262.8 M | 255.8 M | 269.6 M |
-| 8 | 280.0 M | 306.8 M | **329.7 M** | 435.8 M |
-
-Single-thread results in the VM (g++): fast engine 62.1 M commands/sec, p99 125 ns,
-p99.9 211 ns, 0 allocations; reference 17.3 M.
-
-What this shows, and what it does not:
-
-- Linux gave 10 to 18% more aggregate throughput than macOS at 8 threads, and two threads
-  scaled almost perfectly (122 M against 104 M). That supports scheduling as the cause.
-- Pinning helped at 7 and 8 threads (330 M against 307 M) and made no difference below that.
-- It is still well short of the 460 to 490 M that 8 full-speed cores would give. The VM's
-  CPUs are virtual: pinning binds a thread to a virtual CPU, and macOS underneath still
-  decides which physical core, performance or efficiency, runs it. This is not a
-  bare-metal Linux result.
-- Each configuration was run once (median of 5 passes inside the run).
+The VM is no faster than macOS and noisier (two pinned threads managed only 71.9 M in this
+run). Pinning made a small difference at 7 and 8 threads and none below. This does not
+settle the question: the VM's CPUs are virtual, so pinning binds a thread to a virtual CPU
+while macOS underneath still chooses the physical core. A bare-metal Linux machine with
+isolated cores has not been measured.
 
 What sharding does and does not give:
 
@@ -157,35 +158,61 @@ What sharding does and does not give:
 ## Determinism check
 
 A 2,000,000-command, 4-instrument run was journaled by `aetherd` (96 MB log) and replayed
-with `aether_replay`. All four runs gave the same output hash over 3,681,324 events:
+with `aether_replay`. All four runs gave the same output hash over 3,661,486 events:
 
 | Run | Hash |
 |---|---|
-| Live, threaded, fast book | `0x56ece52b331d50b3` |
-| Replay, single thread, fast book | `0x56ece52b331d50b3` |
-| Replay, single thread, reference book | `0x56ece52b331d50b3` |
-| Replay, threaded, fast book | `0x56ece52b331d50b3` |
+| Live, threaded, fast book | `0xddd9529a77594a11` |
+| Replay, single thread, fast book | `0xddd9529a77594a11` |
+| Replay, single thread, reference book | `0xddd9529a77594a11` |
+| Replay, threaded, fast book | `0xddd9529a77594a11` |
+
+## Where a command's time goes
+
+Single thread, fast engine, to see how much room is left:
+
+| Measurement | Time per command |
+|---|---|
+| Only reading the command array | 0.9 ns |
+| Reading plus an unpredictable branch on command type and side, no other work | 3.5 ns |
+| Burst of passive inserts only, 20,000 resting orders | 7.1 ns |
+| Burst of cancels only, random resting order | 7.1 ns |
+| Inserts and cancels in runs of 64 of each, no trades | 7.4 ns |
+| The same inserts and cancels randomly interleaved | 10.3 ns |
+| Full benchmark mix (trades, modifies, market and IOC orders) | 16.2 ns |
+
+Random order flow makes the command type unpredictable, and that alone costs about 3 ns per
+command (10.3 against 7.4). Matching, modifies and the crossing test account for the rest.
+The straight-line work is about 7 ns, so the engine is roughly a factor of two above what
+this design could reach if nothing were ever mispredicted.
 
 ## Optimisation log
 
-Every change was measured before and after on the same machine and stream.
+Every change was measured before and after on the same machine. Rows marked (old stream)
+were measured before the workload fix below and are kept as measured.
 
 | Change | Before | After | Kept |
 |---|---|---|---|
-| Reference book replaced by pool + intrusive FIFO + flat price arrays + bitmap | 17.2 M/s, 0.551 allocs | 57.6 M/s, 0 allocs | yes |
-| Pipeline: batched ring transfers (one atomic update per batch of up to 256), spin-then-yield waiting, and one hash multiply per field instead of per byte | 6.7 M/s | 25.4 M/s | yes |
-| Book: per-side state in an array indexed by side and a branch-free crossing test, so resting and cancelling do not branch on buy/sell | 57.6 M/s | 60.5 M/s | yes |
-| Sharding: one engine thread per group of instruments, no shared state | 60 M/s on 1 thread | 263 to 280 M/s on 8 threads | yes |
-| Linux VM with threads pinned to (virtual) CPUs, 8 engine threads | 280 M/s on macOS | 330 M/s | n/a: environment, not code |
-| Profile-guided optimisation (clang `-fprofile-instr-use`) | 57.5 M/s | 59.2 M/s | no: about 3%, not worth a two-stage build |
-| Software prefetch of the id index and the order a few commands ahead | 57.9 M/s | 34.3 M/s | no: slower. The working set already fits in cache; the cost is branches, not memory |
+| Reference book replaced by pool + intrusive FIFO + flat price arrays + bitmap (old stream) | 17.2 M/s, 0.551 allocs | 57.6 M/s, 0 allocs | yes |
+| Pipeline: batched ring transfers (one atomic update per batch of up to 256), spin-then-yield waiting, one hash multiply per field instead of per byte (old stream) | 6.7 M/s | 25.4 M/s | yes |
+| Book: per-side state in an array indexed by side, branch-free crossing test (old stream) | 57.6 M/s | 60.5 M/s | yes |
+| Sharding: one engine thread per group of instruments, no shared state | 60 M/s on 1 thread | about 270 M/s on 8 threads | yes |
+| **Workload fix.** The generator did not know when orders were filled, so 90% of its cancels and modifies named orders that were already gone and were rejected almost for free, and the book held about 2,000 orders instead of 20,000. It now tracks resting orders through a reference engine | fast 60.5 M/s, reference 17.2 M/s | fast 61.9 M/s, reference 4.2 M/s | yes |
+| Pool: stack of free pointers instead of a free list threaded through the slots, which made each allocation wait on a load from the previous slot | insert burst 11.5 ns | insert burst 7.1 ns; full mix unchanged | yes |
+| Price level: sentinel ring, so link and unlink have no branches; branch-free bitmap clear | 60.2 M/s | 59.7 to 61.7 M/s (no measurable change) | yes: simpler code, no slower |
+| Profile-guided optimisation (clang `-fprofile-instr-use`) (old stream) | 57.5 M/s | 59.2 M/s | no: about 3%, not worth a two-stage build |
+| Software prefetch of the id index and the order a few commands ahead (old stream) | 57.9 M/s | 34.3 M/s | no: much slower |
+
+Two things in earlier versions of this page were wrong and have been corrected: the
+four-instrument p99.9 comparison came from a single noisy run, and the scaling loss was
+blamed on cache and memory bandwidth before it had been measured.
 
 ## What these numbers do and do not mean
 
 - **Clock resolution.** On Apple Silicon `steady_clock` advances in steps of about 41 ns
   (the benchmark prints the smallest step it sees). Per-command latencies are multiples of
   that step, so p50 = 41 ns means "at most one clock tick", not exactly 41 ns. The mean
-  time per command from the throughput run is about 16.5 ns for the fast engine and 58 ns
+  time per command from the throughput run is about 16 ns for the fast engine and 240 ns
   for the reference. The p99 and p99.9 figures are several ticks and are meaningful.
 - **Synthetic flow.** The order flow is generated, not recorded from a real market. Real
   flow has different price and cancel patterns.
