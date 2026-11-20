@@ -11,12 +11,16 @@ add_executable(unit_tests
     unit/core/test_core.cpp
     unit/core/test_event_sink.cpp
     unit/memory/test_pool.cpp
+    unit/book/test_book_parts.cpp
+    unit/engine/test_engine.cpp
+    scenario/test_matching.cpp
 )
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(unit_tests PRIVATE
     aether::core
     aether::memory
     aether::reference
+    aether::book
     aether::engine
     aether::warnings
     GTest::gtest_main
