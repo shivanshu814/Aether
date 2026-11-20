@@ -20,7 +20,8 @@ namespace aether {
 //   best price   -> cached index, repaired with a bitmap when a level empties
 //   side         -> per-side state lives in an array indexed by side, so resting and
 //                   cancelling do not branch on buy/sell
-//   FIFO         -> intrusive list threaded through the orders themselves
+//   FIFO         -> intrusive ring threaded through the orders, closed by a sentinel in
+//                   the level, so linking and unlinking never branch
 //   id lookup    -> vector indexed by order id
 //   orders       -> fixed pool allocated once
 // After construction no operation allocates.
@@ -172,19 +173,19 @@ private:
     // Fill against one level, front to back. Fully filled makers go back to the pool.
     template <EventSink S>
     void sweep_level(PriceLevel& level, Price price, const Command& taker, Qty& remaining, S& sink) {
-        Order* maker = level.head;
-        while (remaining > 0 && maker != nullptr) {
+        Link* link = level.sentinel.next;
+        while (remaining > 0 && !level.is_end(link)) {
+            Order* maker = static_cast<Order*>(link);
             const Qty fill = std::min(remaining, maker->qty);
             sink.emit(ev::trade(taker, maker->id, price, fill));
             remaining -= fill;
             maker->qty -= fill;
             level.total -= fill;
             if (maker->qty != 0) break; // taker is exhausted
-            Order* next = maker->next;
+            link = maker->next;
             level.unlink(maker);
             index_[maker->id] = nullptr;
             pool_.destroy(maker);
-            maker = next;
         }
     }
 
@@ -247,14 +248,13 @@ private:
         const std::size_t i     = index_of(o->price);
         BookSide&         side  = sides_[static_cast<std::size_t>(o->side)];
         level->unlink(o);
-        if (level->empty()) {
-            side.bits.clear(i);
-            if (i == side.best) { // the best level just emptied: find the next one
-                if (o->side == Side::Buy) {
-                    side.best = i == 0 ? kNone : side.bits.prev_at_or_below(i - 1);
-                } else {
-                    side.best = side.bits.next_at_or_above(i + 1);
-                }
+        const bool emptied = level->empty();
+        side.bits.clear_if(i, emptied);
+        if (emptied && i == side.best) [[unlikely]] { // the best level just emptied: find the next one
+            if (o->side == Side::Buy) {
+                side.best = i == 0 ? kNone : side.bits.prev_at_or_below(i - 1);
+            } else {
+                side.best = side.bits.next_at_or_above(i + 1);
             }
         }
         index_[o->id] = nullptr;

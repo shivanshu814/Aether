@@ -17,6 +17,10 @@ public:
 
     void set(std::size_t i) noexcept { words_[i >> 6] |= std::uint64_t{1} << (i & 63); }
     void clear(std::size_t i) noexcept { words_[i >> 6] &= ~(std::uint64_t{1} << (i & 63)); }
+    // Clears bit i when `condition` is true, without branching on it.
+    void clear_if(std::size_t i, bool condition) noexcept {
+        words_[i >> 6] &= ~(static_cast<std::uint64_t>(condition) << (i & 63));
+    }
     bool test(std::size_t i) const noexcept { return (words_[i >> 6] >> (i & 63)) & 1U; }
 
     // Lowest set index >= from, or npos.
