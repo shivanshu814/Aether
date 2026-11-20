@@ -127,7 +127,8 @@ Key rules:
 
 ## Not done yet
 
-- Linux and x86 benchmarks, with thread pinning and isolated cores.
+- Bare-metal Linux and x86 benchmarks with isolated cores. A Linux VM on the same laptop,
+  with threads pinned, reached 330 M commands/sec on 8 engine threads.
 - A network gateway and a binary wire protocol. Order flow is generated in-process.
 - Sharding inside the live pipeline. Sharded engines are implemented and benchmarked, but
   `aetherd` still runs a single engine thread.

@@ -7,6 +7,11 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
+
 #include "aether/concurrency/spsc_ring.hpp"
 #include "aether/engine/engine.hpp"
 
@@ -42,6 +47,20 @@ inline std::vector<std::vector<BookConfig>> partition_instruments(std::span<cons
     return shards;
 }
 
+// Pins the calling thread to one CPU. Only Linux can do this; elsewhere it does nothing and
+// returns false (macOS has no call to bind a thread to a core).
+inline bool pin_current_thread(std::size_t cpu) noexcept {
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
+#else
+    (void)cpu;
+    return false;
+#endif
+}
+
 template <class Sink>
 struct ShardedRun {
     std::vector<Sink>   sinks;         // one per shard, in shard order
@@ -50,10 +69,12 @@ struct ShardedRun {
 };
 
 // Runs one engine per shard, each on its own thread. Engines are built before the clock
-// starts; all threads are released together.
+// starts; all threads are released together. With pin_threads, shard s is bound to CPU s
+// (Linux only), so the scheduler cannot move it or stack two shards on one core.
 template <class Book, class Sink>
 ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_instruments,
-                             const std::vector<std::vector<Command>>&    shard_commands) {
+                             const std::vector<std::vector<Command>>&    shard_commands,
+                             bool                                        pin_threads = false) {
     using Clock = std::chrono::steady_clock;
     struct alignas(64) Slot { // one cache line per shard: no false sharing between sinks
         Sink              sink{};
@@ -69,6 +90,7 @@ ShardedRun<Sink> run_sharded(const std::vector<std::vector<BookConfig>>& shard_i
 
     for (std::size_t s = 0; s < shard_count; ++s) {
         threads.emplace_back([&, s] {
+            if (pin_threads) pin_current_thread(s);
             Engine<Book>                engine(shard_instruments[s]);
             const std::vector<Command>& commands = shard_commands[s];
             Sink&                       sink     = slots[s].sink;

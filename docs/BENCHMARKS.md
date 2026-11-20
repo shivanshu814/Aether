@@ -108,7 +108,42 @@ What is left is scheduling. The machine has 8 performance and 2 efficiency cores
 decides which thread runs where and cannot be told to pin them, and raising the thread
 priority class made no difference. With every thread on a performance core at single-thread
 speed the ceiling on this machine would be about 8 x 58 M = 460 M commands/sec. Reaching it
-needs an OS that can pin threads to isolated cores (Linux), which has not been measured.
+needs an OS that can pin threads to isolated physical cores. Bare-metal Linux has not been
+measured; a Linux VM on this laptop is below.
+
+### Linux with thread pinning (in a VM on the same laptop)
+
+To test the scheduling explanation, the same benchmark was built and run inside a Linux
+virtual machine on the same M1 Pro: OrbStack, kernel 6.17, Debian 12, g++ 12.2,
+`-O3 -mcpu=native`, 10 virtual CPUs. `--pin 1` binds shard `s` to CPU `s` with
+`pthread_setaffinity_np`.
+
+```bash
+./aether_bench --count 5000000 --runs 5 --shards 8           # not pinned
+./aether_bench --count 5000000 --runs 5 --shards 8 --pin 1   # pinned
+```
+
+| Engine threads | macOS, until last shard | Linux VM, not pinned | Linux VM, pinned | Linux VM pinned, sum of shard rates |
+|---|---|---|---|---|
+| 1 | 59.5 M | 61.7 M | 61.4 M | 61.4 M |
+| 2 | 103.8 M | 122.5 M | 121.0 M | 121.6 M |
+| 4 | 161.3 M | 196.8 M | 188.6 M | 213.0 M |
+| 6 | 227.7 M | 262.8 M | 255.8 M | 269.6 M |
+| 8 | 280.0 M | 306.8 M | **329.7 M** | 435.8 M |
+
+Single-thread results in the VM (g++): fast engine 62.1 M commands/sec, p99 125 ns,
+p99.9 211 ns, 0 allocations; reference 17.3 M.
+
+What this shows, and what it does not:
+
+- Linux gave 10 to 18% more aggregate throughput than macOS at 8 threads, and two threads
+  scaled almost perfectly (122 M against 104 M). That supports scheduling as the cause.
+- Pinning helped at 7 and 8 threads (330 M against 307 M) and made no difference below that.
+- It is still well short of the 460 to 490 M that 8 full-speed cores would give. The VM's
+  CPUs are virtual: pinning binds a thread to a virtual CPU, and macOS underneath still
+  decides which physical core, performance or efficiency, runs it. This is not a
+  bare-metal Linux result.
+- Each configuration was run once (median of 5 passes inside the run).
 
 What sharding does and does not give:
 
@@ -141,6 +176,7 @@ Every change was measured before and after on the same machine and stream.
 | Pipeline: batched ring transfers (one atomic update per batch of up to 256), spin-then-yield waiting, and one hash multiply per field instead of per byte | 6.7 M/s | 25.4 M/s | yes |
 | Book: per-side state in an array indexed by side and a branch-free crossing test, so resting and cancelling do not branch on buy/sell | 57.6 M/s | 60.5 M/s | yes |
 | Sharding: one engine thread per group of instruments, no shared state | 60 M/s on 1 thread | 263 to 280 M/s on 8 threads | yes |
+| Linux VM with threads pinned to (virtual) CPUs, 8 engine threads | 280 M/s on macOS | 330 M/s | n/a: environment, not code |
 | Profile-guided optimisation (clang `-fprofile-instr-use`) | 57.5 M/s | 59.2 M/s | no: about 3%, not worth a two-stage build |
 | Software prefetch of the id index and the order a few commands ahead | 57.9 M/s | 34.3 M/s | no: slower. The working set already fits in cache; the cost is branches, not memory |
 
@@ -158,4 +194,5 @@ Every change was measured before and after on the same machine and stream.
 - **Not a tuned machine.** macOS cannot pin threads to cores or isolate them, and nothing
   else was done to quiet the system. The `max` column is dominated by OS scheduling noise
   and is not reported here.
-- **One machine, one compiler.** No Linux or x86 numbers yet.
+- **One machine.** Everything ran on one Apple M1 Pro laptop. The only Linux numbers are
+  from a VM on that laptop; there are no bare-metal Linux or x86 numbers.

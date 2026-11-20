@@ -1,9 +1,10 @@
 // aether_bench: measure the three headline numbers for the reference and the fast engine.
 //
-//   aether_bench [--count N] [--instruments N] [--seed N] [--runs N] [--shards N]
+//   aether_bench [--count N] [--instruments N] [--seed N] [--runs N] [--shards N] [--pin 1]
 //
 // --shards N adds a scaling section: 1..N engine threads, each with its own instruments and
 // its own stream of --count commands, all started together. Reports aggregate commands/sec.
+// --pin 1 binds shard s to CPU s (Linux only; ignored elsewhere).
 //
 // For each engine:
 //   1. warm-up pass over the whole stream (result discarded)
@@ -130,7 +131,7 @@ std::uint64_t clock_tick_ns() {
 
 // Aggregate throughput of 1..max_shards independent engine threads (fast book).
 // Every shard gets its own instruments and its own seeded stream of load.count commands.
-void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
+void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs, bool pin) {
     const aether::BookConfig                      book = aether::sim::book_config_for(base);
     std::vector<std::vector<aether::Command>>     all_streams;
     for (int s = 0; s < max_shards; ++s) {
@@ -139,8 +140,9 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
         all_streams.push_back(aether::sim::generate(load, book));
     }
 
-    std::printf("\nscaling: one engine thread per shard, %zu commands and %u instrument(s) per shard\n",
-                base.count, base.instruments);
+    std::printf("\nscaling: one engine thread per shard, %zu commands and %u instrument(s) per shard%s\n",
+                base.count, base.instruments,
+                pin ? (aether::pin_current_thread(0) ? ", threads pinned to CPUs" : ", pinning requested but not supported on this OS") : "");
     // "until last shard" divides all commands by the time the slowest thread needed: the
     // conservative figure. "sum of shard rates" adds up what each thread sustained on its own.
     // They differ when the OS runs some threads slower than others.
@@ -152,7 +154,7 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
             static_cast<std::size_t>(n), std::vector<aether::BookConfig>(base.instruments, book));
         const double total = static_cast<double>(base.count) * n;
 
-        aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams); // warm-up
+        aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams, pin); // warm-up
         struct Pass {
             double until_last = 0, sum_rates = 0, slowest = 0, fastest = 0;
         };
@@ -162,12 +164,12 @@ void scaling(const aether::sim::LoadConfig& base, int max_shards, int runs) {
             // Engine construction and thread start-up allocate; that happens before the
             // clock starts but inside this window, so it is subtracted using an empty run.
             const std::uint64_t before = aether::bench::allocation_count();
-            const auto result = aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams);
+            const auto result = aether::run_sharded<aether::OrderBook, CountingSink>(instruments, streams, pin);
             const std::uint64_t with_work = aether::bench::allocation_count() - before;
 
             const std::vector<std::vector<aether::Command>> empty(static_cast<std::size_t>(n));
             const std::uint64_t before_empty = aether::bench::allocation_count();
-            aether::run_sharded<aether::OrderBook, CountingSink>(instruments, empty);
+            aether::run_sharded<aether::OrderBook, CountingSink>(instruments, empty, pin);
             const std::uint64_t setup_only = aether::bench::allocation_count() - before_empty;
             allocs = with_work > setup_only ? with_work - setup_only : 0;
 
@@ -204,6 +206,7 @@ int main(int argc, char** argv) {
     load.count = 5'000'000;
     int runs   = 5;
     int shards = 0;
+    bool pin   = false;
     for (int i = 1; i + 1 < argc; i += 2) {
         if (std::strcmp(argv[i], "--count") == 0) load.count = std::strtoull(argv[i + 1], nullptr, 10);
         if (std::strcmp(argv[i], "--instruments") == 0)
@@ -211,6 +214,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--seed") == 0) load.seed = std::strtoull(argv[i + 1], nullptr, 10);
         if (std::strcmp(argv[i], "--runs") == 0) runs = std::atoi(argv[i + 1]);
         if (std::strcmp(argv[i], "--shards") == 0) shards = std::atoi(argv[i + 1]);
+        if (std::strcmp(argv[i], "--pin") == 0) pin = std::atoi(argv[i + 1]) != 0;
     }
     if (load.count == 0 || load.instruments == 0 || runs <= 0) {
         std::fprintf(stderr, "--count, --instruments and --runs must be positive\n");
@@ -245,6 +249,6 @@ int main(int argc, char** argv) {
     }
     std::printf("speed-up: %.1fx throughput\n", fast.orders_per_sec / reference.orders_per_sec);
 
-    if (shards > 0) scaling(load, shards, runs);
+    if (shards > 0) scaling(load, shards, runs, pin);
     return 0;
 }
