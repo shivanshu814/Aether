@@ -8,67 +8,118 @@ number. A single-threaded engine matches them by price-time priority, with one o
 instrument, and emits acks, trades and cancels. The engine is a pure function of its input
 stream, so any run can be replayed from the log and checked hash-for-hash.
 
-## Status
+## Results
 
-- [x] **M1** · Project skeleton, core types and events
-- [ ] **M2** · Reference engine (`std::map`, kept as the test oracle)
-- [ ] **M3** · Event log and deterministic replay
-- [ ] **M4** · Benchmark harness and baseline numbers
-- [ ] **M5** · Memory pool and intrusive FIFO price levels
-- [ ] **M6** · Flat price array and order-id index
-- [ ] **M7** · Multiple instruments and threads (SPSC rings)
-- [ ] **M8** · Tuning
+Measured on an Apple M1 Pro with Apple clang 21 (`-O3 -mcpu=native`), 5,000,000 commands,
+one instrument, engine only on a single thread:
 
-Target metrics: orders/sec, p50 / p99 / p99.9 latency per command, and **0** heap
-allocations per order in steady state. Results will be published here once measured.
+| Engine | Orders/sec | p99 | p99.9 | Heap allocations per order |
+|---|---|---|---|---|
+| Reference (`std::map`) | 17.1 M | 335 ns | 591 ns | 0.551 |
+| Fast (pool + flat array) | **57.6 M** | **85 ns** | **167 ns** | **0** |
 
-## Requirements
+The fast engine is 3.4x faster, has a 3.5x lower p99.9 and makes zero heap allocations after
+start-up. Both engines produce identical output, event for event.
 
-- CMake 3.25+
-- Ninja
-- A C++20 compiler (developed with Apple clang 21 on Apple Silicon)
+Method, the four-instrument and threaded-pipeline numbers, and the limits of these
+measurements (clock resolution, synthetic order flow, untuned macOS) are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-GoogleTest is downloaded automatically by CMake.
+## What is in it
+
+- **Order types:** Limit, Market and IOC, plus cancel and modify. Reducing quantity keeps
+  time priority; changing price or increasing quantity loses it.
+- **Two order books with the same behaviour.** `RefOrderBook` is a simple `std::map` book
+  kept as the test oracle. `OrderBook` is the fast one: tick-indexed price arrays, an
+  intrusive FIFO per price level, a bitmap to find the next non-empty level, an order-id
+  index and a fixed object pool.
+- **Deterministic replay.** Every sequenced command is journaled as a 48-byte record.
+  `aether_replay` re-runs a log into a fresh engine and prints an FNV-1a hash of the output.
+- **Threaded pipeline.** Gateway/sequencer, engine and publisher threads joined by lock-free
+  single-producer single-consumer ring buffers. Only the engine thread touches the books.
+- **Benchmark harness.** Seeded load generator, log-scale latency histogram and a counting
+  `operator new`.
+
+## How it is tested
+
+81 tests, run in three builds: Debug with AddressSanitizer + UndefinedBehaviorSanitizer,
+Release, and Debug with ThreadSanitizer.
+
+- **Scenario tests** run every hand-written case against both books, including the design
+  document's walkthrough (Buy 450 @ 101.02 fills exactly five makers).
+- **Differential tests** feed the same seeded random stream to the reference and the fast
+  engine and compare their events after every command, then compare the full book depth.
+  A second configuration uses a tiny book to force price-band and book-full rejects.
+- **Replay tests** check that a journaled run replays to the same hash, that the threaded
+  pipeline matches the single-threaded engine, and pin a golden hash for a fixed stream.
+
+## Build and run
+
+Requirements: CMake 3.25+, Ninja and a C++20 compiler. GoogleTest is downloaded by CMake.
 
 ```bash
 brew install cmake ninja   # macOS
+
+# Debug: -O0 -g with AddressSanitizer + UndefinedBehaviorSanitizer
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
+
+# Release: -O3 -mcpu=native, also builds the benchmark
+cmake --preset release && cmake --build --preset release && ctest --preset release
+
+# ThreadSanitizer
+cmake --preset tsan && cmake --build --preset tsan && ctest --preset tsan
 ```
 
-## Build and test
-
 ```bash
-# Debug: -O0 -g with AddressSanitizer + UndefinedBehaviorSanitizer
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
+# Benchmark both engines
+./build/release/bench/aether_bench --count 5000000
 
-# Release: -O3, used for all reported numbers
-cmake --preset release
-cmake --build --preset release
-ctest --preset release
+# Run the threaded exchange on generated flow and journal it
+./build/release/apps/aetherd --count 2000000 --instruments 4 --log run.log
+
+# Replay the journal; the hash must match the one aetherd printed
+./build/release/apps/aether_replay run.log
+./build/release/apps/aether_replay run.log --reference
 ```
 
 ## Project layout
 
 ```
 aether/
-├── libs/core/      types (Price, Qty, Side, ...) and Command / Event structs
-├── tests/unit/     GoogleTest unit tests
-└── docs/           design document
+├── libs/                 one small library per folder; each sees only what it links
+│   ├── core/             types, Command / Event, EventSink concept, BookConfig
+│   ├── memory/           Pool<T>: fixed-capacity object pool
+│   ├── concurrency/      SpscRing<T>: lock-free single-producer single-consumer queue
+│   ├── reference/        RefOrderBook: slow std::map oracle
+│   ├── book/             OrderBook: the fast book (Order, PriceLevel, LevelBitmap)
+│   ├── engine/           Engine<Book>: instrument id -> book, command dispatch
+│   ├── journal/          event log reader/writer, FNV-1a hash sink
+│   ├── sim/              deterministic load generator
+│   └── runtime/          threaded gateway -> engine -> publisher pipeline
+├── apps/
+│   ├── aetherd/          the threaded exchange on generated flow
+│   └── replay/           replay a log, print the output hash
+├── bench/                benchmark, latency histogram, allocation counter
+├── tests/                unit, scenario, differential and replay tests
+└── docs/                 design document and benchmark results
 ```
-
-New libraries (`reference`, `engine`, `journal`, `book`, ...) are added under `libs/` as each
-milestone lands.
 
 ## Design
 
-The full design, with diagrams, pseudocode and the build plan, is in
+The full design, with diagrams and pseudocode, is in
 [docs/AETHER_DESIGN.md](docs/AETHER_DESIGN.md).
 
 Key rules:
 
 - Prices are integer ticks, never floating point.
 - The engine never reads the clock, the network or the disk. It only sees sequenced commands.
-- All memory is allocated at startup. The hot path never calls `new`.
+- All memory is allocated at start-up. The hot path never calls `new`.
 - `Command` and `Event` are fixed 48-byte, trivially copyable structs, enforced by
-  `static_assert`.
+  `static_assert`. `Order` is exactly one 64-byte cache line.
+- Events leave the engine through a C++20 concept, not a virtual call.
+
+## Not done yet
+
+- Linux and x86 benchmarks, with thread pinning and isolated cores.
+- A network gateway and a binary wire protocol. Order flow is generated in-process.
+- Sharding books across several engine threads.
