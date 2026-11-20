@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------- Options ----------
 option(AETHER_BUILD_TESTS "Build tests" ON)
+option(AETHER_NATIVE "Tune for the build machine (-mcpu/-march=native)" OFF)
 set(AETHER_SANITIZER "" CACHE STRING "e.g. address,undefined  or  thread")
 
 # ---------- Sanitizers ----------
@@ -16,6 +17,18 @@ if(AETHER_SANITIZER)
     add_compile_options(-fsanitize=${AETHER_SANITIZER} -fno-omit-frame-pointer)
     add_link_options(-fsanitize=${AETHER_SANITIZER})
 endif()
+
+if(AETHER_NATIVE)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(-mcpu=native AETHER_HAS_MCPU_NATIVE)
+    if(AETHER_HAS_MCPU_NATIVE)
+        add_compile_options(-mcpu=native)
+    else()
+        add_compile_options(-march=native)
+    endif()
+endif()
+
+find_package(Threads REQUIRED)
 
 # ---------- Warnings ----------
 add_library(aether_warnings INTERFACE)
@@ -25,6 +38,7 @@ target_compile_options(aether_warnings INTERFACE
 
 # ---------- Code ----------
 add_subdirectory(libs)
+add_subdirectory(apps)
 
 if(AETHER_BUILD_TESTS)
     enable_testing()

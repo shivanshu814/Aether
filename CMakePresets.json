@@ -19,7 +19,16 @@
             "name": "release",
             "inherits": "base",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "AETHER_NATIVE": "ON"
+            }
+        },
+        {
+            "name": "tsan",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "AETHER_SANITIZER": "thread"
             }
         }
     ],
@@ -31,6 +40,10 @@
         {
             "name": "release",
             "configurePreset": "release"
+        },
+        {
+            "name": "tsan",
+            "configurePreset": "tsan"
         }
     ],
     "testPresets": [
@@ -44,6 +57,13 @@
         {
             "name": "release",
             "configurePreset": "release",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "tsan",
+            "configurePreset": "tsan",
             "output": {
                 "outputOnFailure": true
             }
